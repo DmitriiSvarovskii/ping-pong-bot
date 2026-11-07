@@ -1,0 +1,1 @@
+"""PingStats test suite."""

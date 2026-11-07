@@ -1,0 +1,1 @@
+"""Friendships persistence adapters."""

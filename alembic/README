@@ -1,0 +1,4 @@
+Alembic migration environment for the PingStats PostgreSQL database.
+
+Connection settings are loaded from pingstats.core.config.Settings; credentials
+must not be stored in alembic.ini.
