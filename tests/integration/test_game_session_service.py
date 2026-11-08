@@ -249,6 +249,15 @@ async def test_queue_rotation_leave_restore_and_idempotency_are_transactional(
             created.session.id
         )
     with pytest.raises(RuntimeError, match="successor creation failure"):
+        await service.skip_current_match(
+            FailingSuccessorUow(session_factory),
+            actor_id=organizer,
+            session_id=created.session.id,
+            match_id=first_match.match.id,
+            skipped_player_id=organizer,
+            skip_both=False,
+        )
+    with pytest.raises(RuntimeError, match="successor creation failure"):
         await service.record_session_result(
             FailingSuccessorUow(session_factory),
             actor_id=player,
@@ -267,6 +276,17 @@ async def test_queue_rotation_leave_restore_and_idempotency_are_transactional(
     assert match_after_rollback.match.status.value == "active"
     assert match_after_rollback.sets == ()
     assert queue_after_rollback == before_state
+    async with session_factory() as session:
+        skipped_event_count = await session.scalar(
+            select(func.count())
+            .select_from(GameSessionQueueEventModel)
+            .where(
+                GameSessionQueueEventModel.session_id == created.session.id,
+                GameSessionQueueEventModel.event_type
+                == GameSessionEventType.CURRENT_GAME_SKIPPED.value,
+            )
+        )
+    assert skipped_event_count == 0
 
     rotated = await service.record_session_result(
         SqlAlchemyGameSessionsUnitOfWork(session_factory),
@@ -562,6 +582,34 @@ async def test_result_vs_cancel_and_result_vs_complete_are_serialized() -> None:
             )
         assert stored is not None and stored.status is GameSessionStatus.COMPLETED
         assert active_count == 0
+
+        skip_session_id, skip_match = await create_active_session()
+        skip_race = await asyncio.gather(
+            *(
+                service.skip_current_match(
+                    SqlAlchemyGameSessionsUnitOfWork(database.session_factory),
+                    actor_id=organizer,
+                    session_id=skip_session_id,
+                    match_id=skip_match.match.id,
+                    skipped_player_id=None,
+                    skip_both=True,
+                )
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+        assert len([item for item in skip_race if not isinstance(item, BaseException)]) == 1
+        assert len([item for item in skip_race if isinstance(item, MatchStateError)]) == 1
+        async with database.session_factory() as session:
+            skip_active_count = await session.scalar(
+                select(func.count())
+                .select_from(MatchModel)
+                .where(
+                    MatchModel.game_session_id == skip_session_id,
+                    MatchModel.status == "active",
+                )
+            )
+        assert skip_active_count == 1
     finally:
         async with database.session_factory() as session:
             for session_id in session_ids:

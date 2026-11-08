@@ -69,6 +69,8 @@ class MatchRepository(Protocol):
         self, session_id: UUID, *, limit: int, offset: int
     ) -> tuple[Sequence[MatchView], int]: ...
 
+    async def list_completed_for_session(self, session_id: UUID) -> Sequence[MatchView]: ...
+
     async def update_match(
         self,
         match: Match,

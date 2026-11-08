@@ -130,11 +130,13 @@ fields не считаются доверенными. Неверная подп
 | GET | `/game-sessions/{session_id}/participants` | Реализовано; `active_only=true`, `limit`/`offset` |
 | GET | `/game-sessions/{session_id}/queue` | Реализовано; current pair, waiting и `is_paused` |
 | GET | `/game-sessions/{session_id}/matches` | Реализовано; история строго по `sequence_number`, включая cancelled |
+| GET | `/game-sessions/{session_id}/statistics` | Реализовано; read-only лидерборд текущей сессии по завершённым матчам |
 | GET | `/game-sessions/{session_id}/matches/current` | Реализовано; current active match либо 404 |
 | POST | `/game-sessions/{session_id}/matches/current/sets` | Реализовано; добавить партию текущего матча |
 | PUT | `/game-sessions/{session_id}/matches/current/result` | Реализовано; записать полный результат |
 | POST | `/game-sessions/{session_id}/matches/current/cancel` | Реализовано; organizer/current player отменяет и получает successor |
 | POST | `/game-sessions/{session_id}/matches/current/cancel-and-leave` | Реализовано; current player атомарно отменяет матч и выходит |
+| POST | `/game-sessions/{session_id}/matches/current/skip` | Реализовано; отменить current match и переместить первого, второго либо обоих игроков в хвост |
 
 Create body: `SessionCreateRequest` с nullable `name`, положительными `points_to_win` и
 `sets_to_win`, `is_ranked`. `SessionResponse` не раскрывает audit payload и содержит только
@@ -148,6 +150,18 @@ Create body: `SessionCreateRequest` с nullable `name`, положительны
 `current_match`-successor и обновлённую `queue`. Идентичный retry завершённого матча использует
 `game_session_processed_results`; stale/non-current ID возвращает 409.
 
+Skip body содержит `match_id` и ровно один вариант: `skipped_player_id` текущего игрока либо
+`skip_both=true`. Команда доступна organizer или одному из current players. Она возвращает тот же
+`SessionMatchCommandResponse`: cancelled match без winner, один successor и обновлённую queue.
+Повтор со старым `match_id` возвращает 409 и не создаёт дополнительный матч.
+
+`SessionStatisticsResponse` содержит `items`, уже отсортированные по wins DESC, point difference
+DESC, losses ASC и UUID ASC. Каждый item: публичный `user`, `wins`, `losses`, `points_for`,
+`points_against`, `point_difference`. Источник — все исторические участники сессии и только её
+валидные completed matches/sets; вышедшие участники сохраняются, участники без матчей получают нули.
+Endpoint ничего не записывает, не возвращает глобальный рейтинг и доступен по тем же правилам, что
+история матчей.
+
 `SessionQueueResponse` возвращает `current_pair`, ordered `waiting` и `is_paused`. Для active-сессии
 с одним оставшимся игроком обе коллекции пусты и `is_paused=true`; следующий join создаёт новую
 пару/match. История доступна organizer и любому когда-либо участвовавшему пользователю, queue —
@@ -156,7 +170,7 @@ Create body: `SessionCreateRequest` с nullable `name`, положительны
 PS-007.5b подтверждает контракт реальными JWT/FastAPI/PostgreSQL E2E: полный flow A/B/C,
 двухпользовательская очередь, active join/waiting leave, pause/resume, cancel/cancel-and-leave,
 идемпотентный retry, stale match, запрет standalone correction и lifecycle/permission errors.
-OpenAPI содержит все 15 путей, Bearer security, обязательный `match_id` и документированные
+OpenAPI содержит все session paths, Bearer security, обязательный `match_id` и документированные
 400/401/403/404/409/422 responses. Swagger UI доступен локально по `/docs`.
 
 Frontend PS-008.2b использует этот контракт без дополнительных endpoint: список и detail,

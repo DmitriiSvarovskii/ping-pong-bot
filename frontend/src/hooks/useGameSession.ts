@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getCurrentSessionMatch,
   getSession,
+  getSessionStatistics,
   getSessionQueue,
   listParticipants,
   listSessionMatches,
@@ -16,6 +17,7 @@ export const sessionKeys = {
   queue: (id: string) => ['game-sessions', id, 'queue'] as const,
   currentMatch: (id: string) => ['game-sessions', id, 'current-match'] as const,
   matches: (id: string) => ['game-sessions', id, 'matches'] as const,
+  statistics: (id: string) => ['game-sessions', id, 'statistics'] as const,
 }
 
 export function useGameSession(sessionId: string) {
@@ -48,7 +50,12 @@ export function useGameSession(sessionId: string) {
     queryFn: ({ signal }) => listSessionMatches(apiClient, sessionId, signal),
     refetchInterval: isActive ? 4_000 : false,
   })
-  return { detail, participants, queue, currentMatch, matches }
+  const statistics = useQuery({
+    queryKey: sessionKeys.statistics(sessionId),
+    queryFn: ({ signal }) => getSessionStatistics(apiClient, sessionId, signal),
+    refetchInterval: isActive ? 4_000 : false,
+  })
+  return { detail, participants, queue, currentMatch, matches, statistics }
 }
 
 export function useInvalidateSession() {
@@ -61,6 +68,7 @@ export function useInvalidateSession() {
       queryClient.invalidateQueries({ queryKey: sessionKeys.queue(sessionId) }),
       queryClient.invalidateQueries({ queryKey: sessionKeys.currentMatch(sessionId) }),
       queryClient.invalidateQueries({ queryKey: sessionKeys.matches(sessionId) }),
+      queryClient.invalidateQueries({ queryKey: sessionKeys.statistics(sessionId) }),
     ])
   }
 }

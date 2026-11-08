@@ -30,6 +30,7 @@ from pingstats.modules.game_sessions.domain import (
     GameSessionStatus,
 )
 from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.errors import MatchStateError
 from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
@@ -232,6 +233,10 @@ class FakeGameSessionRepository:
             len(records),
         )
 
+    async def list_historical_users(self, session_id: UUID) -> Sequence[User]:
+        user_ids = {item.user_id for item in self.participants if item.session_id == session_id}
+        return tuple(self.users[user_id] for user_id in sorted(user_ids, key=str))
+
 
 class FakeCurrentMatchChecker:
     def __init__(self) -> None:
@@ -328,6 +333,19 @@ class FakeMatchRepository:
             key=lambda view: view.match.sequence_number or 0,
         )
         return tuple(views[offset : offset + limit]), len(views)
+
+    async def list_completed_for_session(self, session_id: UUID) -> Sequence[MatchView]:
+        return tuple(
+            sorted(
+                (
+                    view
+                    for view in self.views.values()
+                    if view.match.game_session_id == session_id
+                    and view.match.status is MatchStatus.COMPLETED
+                ),
+                key=lambda view: view.match.sequence_number or 0,
+            )
+        )
 
     async def update_match(
         self,
@@ -673,6 +691,81 @@ async def test_rotation_is_idempotent_and_cancel_preserves_queue(setup) -> None:
     assert restored.queue == rotated.queue
     assert restored.current_match is not None
     assert restored.current_match.match.sequence_number == 3
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_pair", "expected_waiting"),
+    [
+        ("first", ("player", "outsider"), ("organizer",)),
+        ("second", ("organizer", "outsider"), ("player",)),
+        ("both", ("outsider", "organizer"), ("player",)),
+    ],
+)
+async def test_skip_current_match_rotates_without_result_or_rating_input(
+    setup, target: str, expected_pair: tuple[str, str], expected_waiting: tuple[str, ...]
+) -> None:
+    service, repository, checker, organizer, player, outsider = setup
+    users = {"organizer": organizer, "player": player, "outsider": outsider}
+    created = await service.create_session(
+        uow(repository, checker), actor_id=organizer, is_ranked=True
+    )
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=created.session.id
+    )
+    await service.join_session(
+        uow(repository, checker), actor_id=outsider, session_id=created.session.id
+    )
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    current = await repository.matches.get_current_for_session(created.session.id)
+    assert current is not None
+
+    result = await service.skip_current_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=current.match.id,
+        skipped_player_id=(
+            None if target == "both" else organizer if target == "first" else player
+        ),
+        skip_both=target == "both",
+    )
+
+    assert result.match.match.status is MatchStatus.CANCELLED
+    assert result.match.match.winner_id is None
+    assert result.match.sets == ()
+    assert (created.session.id, current.match.id) not in repository.processed_results
+    assert result.current_match is not None
+    assert tuple(item.user_id for item in result.queue.current_pair) == tuple(
+        users[name] for name in expected_pair
+    )
+    assert tuple(item.user_id for item in result.queue.waiting) == tuple(
+        users[name] for name in expected_waiting
+    )
+    assert repository.events[-2].event_type is GameSessionEventType.CURRENT_GAME_SKIPPED
+
+    with pytest.raises(MatchStateError):
+        await service.skip_current_match(
+            uow(repository, checker),
+            actor_id=organizer,
+            session_id=created.session.id,
+            match_id=current.match.id,
+            skipped_player_id=organizer,
+            skip_both=False,
+        )
+    await service.complete_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    with pytest.raises(GameSessionStateError):
+        await service.skip_current_match(
+            uow(repository, checker),
+            actor_id=organizer,
+            session_id=created.session.id,
+            match_id=result.current_match.match.id,
+            skipped_player_id=None,
+            skip_both=True,
+        )
 
 
 async def test_incremental_result_and_cancel_leave_pause_then_join_resume(setup) -> None:

@@ -7,6 +7,7 @@ from uuid import UUID
 from pingstats.modules.game_sessions.application.dto import (
     GameSessionMatchResult,
     GameSessionParticipantItem,
+    GameSessionPlayerStatistics,
     GameSessionQueueView,
     GameSessionView,
 )
@@ -27,6 +28,7 @@ from pingstats.modules.game_sessions.application.ports import (
     GameSessionRepository,
     GameSessionsUnitOfWork,
 )
+from pingstats.modules.game_sessions.application.statistics import calculate_session_statistics
 from pingstats.modules.game_sessions.domain import (
     GameSession,
     GameSessionEventType,
@@ -38,6 +40,7 @@ from pingstats.modules.game_sessions.domain import (
     append_waiting,
     initialize_queue,
     remove_waiting,
+    skip_current_players,
 )
 from pingstats.modules.game_sessions.domain import (
     restore_queue_after_cancel as restore_cancelled_queue,
@@ -446,6 +449,19 @@ class GameSessionService:
         await self._require_read_access(sessions, actor_id, session_id)
         return await matches.list_for_session(session_id, limit=limit, offset=offset)
 
+    async def get_session_statistics(
+        self,
+        sessions: GameSessionRepository,
+        matches: MatchRepository,
+        *,
+        actor_id: UUID,
+        session_id: UUID,
+    ) -> tuple[GameSessionPlayerStatistics, ...]:
+        await self._require_read_access(sessions, actor_id, session_id)
+        users = await sessions.list_historical_users(session_id)
+        completed_matches = await matches.list_completed_for_session(session_id)
+        return calculate_session_statistics(session_id, users, completed_matches)
+
     async def get_current_session_match(
         self,
         sessions: GameSessionRepository,
@@ -641,6 +657,79 @@ class GameSessionService:
                 await self._required_match_view(uow.matches, cancelled.id),
                 successor,
                 queue_view,
+            )
+            await uow.commit()
+        return result
+
+    async def skip_current_match(
+        self,
+        uow: GameSessionsUnitOfWork,
+        *,
+        actor_id: UUID,
+        session_id: UUID,
+        match_id: UUID,
+        skipped_player_id: UUID | None,
+        skip_both: bool,
+    ) -> GameSessionMatchResult:
+        async with uow:
+            session = await self._locked_active_session(uow.game_sessions, session_id)
+            current = await self._locked_current_match(uow.matches, session.id, match_id)
+            if session.organizer_id != actor_id and actor_id not in current.participant_ids():
+                raise MatchPermissionError(
+                    "Only the organizer or a current player can skip this match"
+                )
+            previous = await self._required_queue_state(uow.game_sessions, session.id)
+            current_participants = await uow.game_sessions.get_participants_by_ids(
+                session.id, previous.current_pair
+            )
+            if len(current_participants) != 2:
+                raise GameSessionQueueConflictError("Current pair references missing participants")
+            by_user_id = {
+                participant.user_id: participant.id for participant in current_participants
+            }
+            if skip_both:
+                if skipped_player_id is not None:
+                    raise GameSessionQueueConflictError(
+                        "A specific player cannot be combined with skip_both"
+                    )
+                skipped_participant_ids = previous.current_pair
+            else:
+                if skipped_player_id is None or skipped_player_id not in by_user_id:
+                    raise GameSessionQueueConflictError(
+                        "Skipped player must belong to the current match"
+                    )
+                skipped_participant_ids = (by_user_id[skipped_player_id],)
+            try:
+                updated = skip_current_players(previous, skipped_participant_ids)
+            except InvalidQueueStateError as error:
+                raise GameSessionQueueConflictError(str(error)) from error
+
+            cancelled = await self._cancel_match(uow, session, current, actor_id)
+            await uow.game_sessions.save_queue_state(session.id, updated)
+            await uow.game_sessions.add_event(
+                session_id=session.id,
+                participant_id=None,
+                event_type=GameSessionEventType.CURRENT_GAME_SKIPPED,
+                payload={
+                    **self._queue_payload(
+                        previous,
+                        updated,
+                        reason="current_match_skipped",
+                        result_id=current.match.id,
+                    ),
+                    "actor_id": str(actor_id),
+                    "match_id": str(current.match.id),
+                    "skipped_participant_ids": [
+                        str(participant_id) for participant_id in skipped_participant_ids
+                    ],
+                },
+            )
+            successor = await self._create_next_match(uow, session, updated)
+            await uow.game_sessions.update_session(session)
+            result = GameSessionMatchResult(
+                await self._required_match_view(uow.matches, cancelled.id),
+                successor,
+                await self._required_queue_view(uow.game_sessions, session.id),
             )
             await uow.commit()
         return result

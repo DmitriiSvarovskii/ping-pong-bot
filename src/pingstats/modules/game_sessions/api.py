@@ -26,10 +26,13 @@ from pingstats.modules.game_sessions.schemas import (
     SessionMatchResponse,
     SessionParticipantListResponse,
     SessionParticipantResponse,
+    SessionPlayerStatisticsResponse,
     SessionQueueResponse,
     SessionResponse,
     SessionResultRequest,
     SessionSetRequest,
+    SessionSkipRequest,
+    SessionStatisticsResponse,
 )
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
 from pingstats.modules.users.domain import User
@@ -228,6 +231,25 @@ async def list_session_matches(
     )
 
 
+@game_sessions_router.get("/{session_id}/statistics", response_model=SessionStatisticsResponse)
+async def get_session_statistics(
+    session_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    sessions: Annotated[SqlAlchemyGameSessionRepository, Depends(get_game_session_repository)],
+    matches: Annotated[SqlAlchemyMatchRepository, Depends(get_game_session_match_repository)],
+    service: Annotated[GameSessionService, Depends(get_game_session_service)],
+) -> SessionStatisticsResponse:
+    items = await service.get_session_statistics(
+        sessions,
+        matches,
+        actor_id=current_user.id,
+        session_id=session_id,
+    )
+    return SessionStatisticsResponse(
+        items=[SessionPlayerStatisticsResponse.from_domain(item) for item in items]
+    )
+
+
 @game_sessions_router.get("/{session_id}/matches/current", response_model=SessionMatchResponse)
 async def get_current_match(
     session_id: UUID,
@@ -342,3 +364,25 @@ async def cancel_current_match_and_leave(
         uow=uow,
         service=service,
     )
+
+
+@game_sessions_router.post(
+    "/{session_id}/matches/current/skip",
+    response_model=SessionMatchCommandResponse,
+)
+async def skip_current_match(
+    session_id: UUID,
+    payload: SessionSkipRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
+    service: Annotated[GameSessionService, Depends(get_game_session_service)],
+) -> SessionMatchCommandResponse:
+    result = await service.skip_current_match(
+        uow,
+        actor_id=current_user.id,
+        session_id=session_id,
+        match_id=payload.match_id,
+        skipped_player_id=payload.skipped_player_id,
+        skip_both=payload.skip_both,
+    )
+    return SessionMatchCommandResponse.from_result(result)

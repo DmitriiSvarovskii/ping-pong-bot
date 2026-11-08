@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 
 import { ApiClient } from '../api/client'
 import { SessionQueuePanel } from '../components/SessionQueuePanel'
+import { sessionKeys } from '../hooks/useGameSession'
 import type { CurrentUser } from '../types/api'
 import type {
   GameSession,
@@ -36,6 +37,7 @@ const USER_C = user('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'Саша')
 const PARTICIPANTS = [participant('pa', USER_A), participant('pb', USER_B), participant('pc', USER_C)]
 
 beforeEach(() => {
+  delete window.Telegram
   auth.apiClient = new ApiClient()
   auth.user = { ...USER_A, telegram_id: 1, updated_at: '2026-11-07T10:00:00Z' }
 })
@@ -78,6 +80,78 @@ describe('game sessions frontend', () => {
     await userEvent.type(score, '11')
     await userEvent.click(screen.getByRole('button', { name: 'Сохранить результат' }))
     expect(await screen.findByRole('heading', { name: 'Анна победил' })).toBeInTheDocument()
+  })
+
+  it('invalidates session statistics after recording a result', async () => {
+    mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
+    const { client } = renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    client.setQueryData(sessionKeys.statistics(SESSION_ID), { items: [] })
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '11')
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить результат' }))
+
+    await waitFor(() => expect(client.getQueryState(sessionKeys.statistics(SESSION_ID))?.isInvalidated).toBe(true))
+  })
+
+  it('clears an initial zero on focus and accepts only numeric integer input', async () => {
+    mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    const score = await screen.findByLabelText('Счёт Анна')
+
+    expect(score).toHaveAttribute('inputmode', 'numeric')
+    await userEvent.click(score)
+    expect(score).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Сохранить результат' })).toBeDisabled()
+
+    await userEvent.type(score, '-1.5')
+    expect(score).toHaveValue('15')
+    await userEvent.clear(score)
+    await userEvent.type(score, '11')
+    expect(score).toHaveValue('11')
+    expect(screen.getByRole('button', { name: 'Сохранить результат' })).toBeEnabled()
+  })
+
+  it('returns through Telegram Back Button without saving or cancelling the match', async () => {
+    let telegramBack: (() => void) | undefined
+    const offClick = vi.fn()
+    const hide = vi.fn()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (requestUrl(input).includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    window.Telegram = {
+      WebApp: {
+        initData: 'signed',
+        colorScheme: 'light',
+        platform: 'ios',
+        version: '9.0',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        BackButton: {
+          show: vi.fn(),
+          hide,
+          onClick: vi.fn((callback: () => void) => { telegramBack = callback }),
+          offClick,
+        },
+      },
+    }
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    await screen.findByText('Записать результат')
+
+    act(() => telegramBack?.())
+
+    expect(await screen.findByText(`/games/${SESSION_ID}`)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input, request]) => request?.method === 'PUT' || requestUrl(input).includes('/cancel'))).toBe(false)
+    expect(offClick).toHaveBeenCalledWith(expect.any(Function))
+    expect(hide).toHaveBeenCalledOnce()
+  })
+
+  it('renders result entry safely without the Telegram API', async () => {
+    delete window.Telegram
+    mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    expect(await screen.findByText('Записать результат')).toBeInTheDocument()
   })
 
   it('shows the next pair returned by backend after rotation', async () => {
@@ -143,11 +217,115 @@ describe('game sessions frontend', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Подтвердить' }))
     await waitFor(() => expect(completeCalls).toBe(1))
   })
+
+  it('opens the skip modal and refreshes the current pair after success', async () => {
+    let current = match()
+    const queueBefore = { current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)], waiting: [queueItem('pc', USER_C.id)], is_paused: false }
+    const queueAfter = { current_pair: [queueItem('pb', USER_B.id), queueItem('pc', USER_C.id)], waiting: [queueItem('pa', USER_A.id)], is_paused: false }
+    let statisticsCalls = 0
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input, request) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/matches/current/skip') && request?.method === 'POST') {
+        current = { ...nextMatch(), participants: [{ position: 1, user: USER_B }, { position: 2, user: USER_C }] }
+        return Promise.resolve(jsonResponse({ match: match({ status: 'cancelled' }), current_match: current, queue: queueAfter }))
+      }
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) return Promise.resolve(jsonResponse(session({ status: 'active' })))
+      if (url.includes('/participants')) return Promise.resolve(jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }))
+      if (url.includes('/queue')) return Promise.resolve(jsonResponse(current.sequence_number === 1 ? queueBefore : queueAfter))
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(current))
+      if (url.includes('/matches')) return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      if (url.includes('/statistics')) {
+        statisticsCalls += 1
+        return Promise.resolve(jsonResponse({ items: [{ user: USER_A, wins: 3, losses: 1, points_for: 50, points_against: 33, point_difference: 17 }] }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+    await userEvent.click(await screen.findByRole('button', { name: 'Пропустить' }))
+    const dialog = screen.getByRole('dialog', { name: 'Кого пропустить?' })
+    expect(within(dialog).getByRole('button', { name: 'Борис' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Обоих игроков' })).toBeInTheDocument()
+
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Анна' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(await screen.findByText('#2')).toBeInTheDocument()
+    const skipCall = fetchMock.mock.calls.find(([input]) => requestUrl(input).endsWith('/matches/current/skip'))
+    const skipBody = skipCall?.[1]?.body
+    expect(JSON.parse(typeof skipBody === 'string' ? skipBody : '')).toEqual({
+      match_id: MATCH_ID,
+      skipped_player_id: USER_A.id,
+      skip_both: false,
+    })
+    await waitFor(() => expect(statisticsCalls).toBeGreaterThan(1))
+    expect(screen.getByText('+17')).toBeInTheDocument()
+  })
+
+  it('shows a retry state when session statistics fail to load', async () => {
+    let statisticsCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'active' })))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(
+          jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }),
+        )
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(
+          jsonResponse({
+            current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)],
+            waiting: [queueItem('pc', USER_C.id)],
+            is_paused: false,
+          }),
+        )
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) {
+        return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/statistics')) {
+        statisticsCalls += 1
+        if (statisticsCalls === 1) {
+          return Promise.resolve(
+            jsonResponse(
+              { error: { code: 'service_unavailable', message: 'Unavailable', details: {} } },
+              503,
+            ),
+          )
+        }
+        return Promise.resolve(
+          jsonResponse({
+            items: [
+              {
+                user: USER_A,
+                wins: 1,
+                losses: 0,
+                points_for: 11,
+                points_against: 5,
+                point_difference: 6,
+              },
+            ],
+          }),
+        )
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+
+    expect(await screen.findByText('Не удалось загрузить данные')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Повторить' }))
+
+    expect(await screen.findByText('+6')).toBeInTheDocument()
+    expect(statisticsCalls).toBe(2)
+  })
 })
 
 function renderRoute(element: React.ReactNode, initial: string, path = '*') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route path={path} element={element}/><Route path="*" element={<LocationProbe/>}/></Routes></MemoryRouter></QueryClientProvider>)
+  return { ...render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route path={path} element={element}/><Route path="*" element={<LocationProbe/>}/></Routes></MemoryRouter></QueryClientProvider>), client }
 }
 
 function LocationProbe() {

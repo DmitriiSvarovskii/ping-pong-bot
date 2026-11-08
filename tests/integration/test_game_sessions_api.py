@@ -292,6 +292,157 @@ async def test_three_player_http_acceptance_flow(
     await _assert_match_invariants(env, session_id)
 
 
+async def test_session_statistics_are_derived_and_skip_does_not_change_them(
+    game_sessions_api_environment: ApiEnvironment,
+) -> None:
+    env = game_sessions_api_environment
+    player_a, player_b, player_c, idle, outsider = env.users[:5]
+    session_id = await _create_session(env, player_a, name="Statistics")
+    for player in (player_b, player_c, idle):
+        assert (await _join(env, session_id, player)).status_code == 200
+    assert (await _start(env, session_id, player_a)).status_code == 200
+
+    first = await _current(env, session_id, player_a)
+    first_result = await _record(env, session_id, player_a, first["id"], 11, 8)
+    assert first_result.status_code == 200
+    second = first_result.json()["current_match"]
+    second_result = await _record(env, session_id, player_c, second["id"], 6, 11)
+    assert second_result.status_code == 200
+
+    left = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/leave", headers=env.auth(player_b)
+    )
+    assert left.status_code == 200
+    statistics = await env.client.get(
+        f"/api/v1/game-sessions/{session_id}/statistics", headers=env.auth(player_a)
+    )
+    assert statistics.status_code == 200
+    items = statistics.json()["items"]
+    assert [item["user"]["id"] for item in items] == [
+        str(player_c),
+        str(player_a),
+        str(idle),
+        str(player_b),
+    ]
+    by_user = {item["user"]["id"]: item for item in items}
+    assert (by_user[str(player_a)]["wins"], by_user[str(player_a)]["losses"]) == (1, 1)
+    assert (
+        by_user[str(player_a)]["points_for"],
+        by_user[str(player_a)]["points_against"],
+        by_user[str(player_a)]["point_difference"],
+    ) == (17, 19, -2)
+    assert by_user[str(player_c)]["point_difference"] == 5
+    assert by_user[str(idle)]["wins"] == by_user[str(idle)]["losses"] == 0
+
+    current = second_result.json()["current_match"]
+    skipped = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/matches/current/skip",
+        headers=env.auth(player_c),
+        json={"match_id": current["id"], "skip_both": True},
+    )
+    assert skipped.status_code == 200
+    after_skip = await env.client.get(
+        f"/api/v1/game-sessions/{session_id}/statistics", headers=env.auth(player_a)
+    )
+    assert after_skip.json() == statistics.json()
+    assert (
+        await env.client.get(
+            f"/api/v1/game-sessions/{session_id}/statistics",
+            headers=env.auth(outsider),
+        )
+    ).status_code == 403
+
+    history = await env.client.get(
+        f"/api/v1/game-sessions/{session_id}/matches", headers=env.auth(player_a)
+    )
+    completed = [item for item in history.json()["items"] if item["status"] == "completed"]
+    assert completed and all(item["completed_at"].endswith("Z") for item in completed)
+
+
+@pytest.mark.parametrize(
+    ("payload_key", "expected_pair", "expected_waiting"),
+    [
+        ("first", (1, 2), (3, 0)),
+        ("second", (0, 2), (3, 1)),
+        ("both", (2, 3), (0, 1)),
+    ],
+)
+async def test_skip_current_match_http_rotation_and_stale_retry(
+    game_sessions_api_environment: ApiEnvironment,
+    payload_key: str,
+    expected_pair: tuple[int, int],
+    expected_waiting: tuple[int, int],
+) -> None:
+    env = game_sessions_api_environment
+    players = env.users[:4]
+    session_id = await _create_session(env, players[0], name=f"Skip {payload_key}")
+    for player in players[1:]:
+        assert (await _join(env, session_id, player)).status_code == 200
+    assert (await _start(env, session_id, players[0])).status_code == 200
+    current = await _current(env, session_id, players[0])
+    payload = {"match_id": current["id"], "skip_both": payload_key == "both"}
+    if payload_key != "both":
+        payload["skipped_player_id"] = str(players[0 if payload_key == "first" else 1])
+
+    skipped = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/matches/current/skip",
+        headers=env.auth(players[0]),
+        json=payload,
+    )
+
+    assert skipped.status_code == 200, skipped.text
+    body = skipped.json()
+    assert body["match"]["status"] == "cancelled"
+    assert body["match"]["winner_id"] is None
+    assert body["match"]["sets"] == []
+    assert _queue_user_ids(body["queue"], "current_pair") == [
+        str(players[index]) for index in expected_pair
+    ]
+    assert _queue_user_ids(body["queue"], "waiting") == [
+        str(players[index]) for index in expected_waiting
+    ]
+    repeated = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/matches/current/skip",
+        headers=env.auth(players[0]),
+        json=payload,
+    )
+    assert repeated.status_code == 409
+    await _assert_match_invariants(env, session_id)
+    async with env.session_factory() as session:
+        processed = await session.scalar(
+            select(func.count())
+            .select_from(GameSessionProcessedResultModel)
+            .where(GameSessionProcessedResultModel.session_id == session_id)
+        )
+    assert processed == 0
+
+
+async def test_skip_both_with_two_players_creates_one_safe_successor(
+    game_sessions_api_environment: ApiEnvironment,
+) -> None:
+    env = game_sessions_api_environment
+    first, second = env.users[:2]
+    session_id = await _create_session(env, first, name="Two-player skip")
+    assert (await _join(env, session_id, second)).status_code == 200
+    assert (await _start(env, session_id, first)).status_code == 200
+    current = await _current(env, session_id, first)
+
+    skipped = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/matches/current/skip",
+        headers=env.auth(first),
+        json={"match_id": current["id"], "skip_both": True},
+    )
+
+    assert skipped.status_code == 200
+    assert _queue_user_ids(skipped.json()["queue"], "current_pair") == [
+        str(first),
+        str(second),
+    ]
+    assert skipped.json()["queue"]["waiting"] == []
+    assert skipped.json()["current_match"]["sequence_number"] == 2
+    await _assert_match_invariants(env, session_id)
+
+
 async def test_cancel_leave_pause_resume_and_pending_cancel(
     game_sessions_api_environment: ApiEnvironment,
 ) -> None:

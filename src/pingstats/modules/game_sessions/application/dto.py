@@ -34,3 +34,18 @@ class GameSessionMatchResult:
     match: MatchView
     current_match: MatchView | None
     queue: GameSessionQueueView | None
+
+
+@dataclass(frozen=True, slots=True)
+class GameSessionPlayerStatistics:
+    """Derived statistics for one historical participant within one session."""
+
+    user: User
+    wins: int
+    losses: int
+    points_for: int
+    points_against: int
+
+    @property
+    def point_difference(self) -> int:
+        return self.points_for - self.points_against

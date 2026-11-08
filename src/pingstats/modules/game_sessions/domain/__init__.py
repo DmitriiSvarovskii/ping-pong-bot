@@ -15,6 +15,7 @@ from pingstats.modules.game_sessions.domain.queue import (
     initialize_queue,
     remove_waiting,
     restore_queue_after_cancel,
+    skip_current_players,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "initialize_queue",
     "remove_waiting",
     "restore_queue_after_cancel",
+    "skip_current_players",
 ]

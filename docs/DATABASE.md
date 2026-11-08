@@ -131,6 +131,16 @@ CHECK запрещает пустой/пробельный event type. Инде�
 Это append-only-журнал lifecycle и queue changes. PS-007.4 дополнительно фиксирует
 `match_started` и `match_cancelled`; payload событий rotation/cancel содержит previous/current
 pair, waiting queue, причину и match/result IDs без персональных данных.
+PS-009.2 использует ту же таблицу для `current_game_skipped`: payload хранит previous/current
+pair, обе waiting-очереди, match ID, actor ID и упорядоченные participation IDs пропущенных игроков.
+Новая таблица или колонка не требуется.
+
+PS-009.3 также не меняет схему. Лидерборд сессии — перестраиваемая read projection из
+`game_session_participants` (включая закрытые participation rows), `matches` с
+`context='game_session' AND status='completed'`, `match_participants` и `match_sets`. Мячи
+суммируются по всем сетам; `matches.completed_at TIMESTAMPTZ` является фактическим временем
+завершения и может быть NULL для исторических данных неизвестного происхождения. Накопительная
+таблица статистики не создаётся.
 
 ### Турниры
 

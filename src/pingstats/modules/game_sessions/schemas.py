@@ -4,11 +4,12 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, model_validator
 
 from pingstats.modules.game_sessions.application.dto import (
     GameSessionMatchResult,
     GameSessionParticipantItem,
+    GameSessionPlayerStatistics,
     GameSessionQueueView,
     GameSessionView,
 )
@@ -147,8 +148,43 @@ class SessionMatchListResponse(BaseModel):
     offset: int
 
 
+class SessionPlayerStatisticsResponse(BaseModel):
+    user: UserPublicResponse
+    wins: int
+    losses: int
+    points_for: int
+    points_against: int
+    point_difference: int
+
+    @classmethod
+    def from_domain(cls, item: GameSessionPlayerStatistics) -> "SessionPlayerStatisticsResponse":
+        return cls(
+            user=UserPublicResponse.from_domain(item.user),
+            wins=item.wins,
+            losses=item.losses,
+            points_for=item.points_for,
+            points_against=item.points_against,
+            point_difference=item.point_difference,
+        )
+
+
+class SessionStatisticsResponse(BaseModel):
+    items: list[SessionPlayerStatisticsResponse]
+
+
 class CurrentSessionMatchRequest(BaseModel):
     match_id: UUID
+
+
+class SessionSkipRequest(CurrentSessionMatchRequest):
+    skipped_player_id: UUID | None = None
+    skip_both: bool = False
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "SessionSkipRequest":
+        if self.skip_both == (self.skipped_player_id is not None):
+            raise ValueError("Provide either skipped_player_id or skip_both=true")
+        return self
 
 
 class SessionSetRequest(CurrentSessionMatchRequest, SetScoreInput):

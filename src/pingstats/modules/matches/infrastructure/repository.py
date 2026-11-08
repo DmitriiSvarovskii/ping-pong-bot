@@ -1,5 +1,6 @@
 """PostgreSQL match repository."""
 
+from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -238,6 +239,55 @@ class SqlAlchemyMatchRepository:
             if view is not None:
                 views.append(view)
         return tuple(views), int(total or 0)
+
+    async def list_completed_for_session(self, session_id: UUID) -> Sequence[MatchView]:
+        """Load all completed session matches with participants and sets in three queries."""
+        models = (
+            await self._session.scalars(
+                select(MatchModel)
+                .where(
+                    MatchModel.game_session_id == session_id,
+                    MatchModel.context == MatchContext.GAME_SESSION,
+                    MatchModel.status == MatchStatus.COMPLETED,
+                )
+                .order_by(MatchModel.sequence_number, MatchModel.id)
+            )
+        ).all()
+        if not models:
+            return ()
+
+        match_ids = [model.id for model in models]
+        participant_rows = (
+            await self._session.execute(
+                select(MatchParticipantModel, UserModel)
+                .join(UserModel, UserModel.id == MatchParticipantModel.user_id)
+                .where(MatchParticipantModel.match_id.in_(match_ids))
+                .order_by(MatchParticipantModel.match_id, MatchParticipantModel.position)
+            )
+        ).all()
+        set_models = (
+            await self._session.scalars(
+                select(MatchSetModel)
+                .where(MatchSetModel.match_id.in_(match_ids))
+                .order_by(MatchSetModel.match_id, MatchSetModel.set_number)
+            )
+        ).all()
+        participants_by_match: dict[UUID, list] = defaultdict(list)
+        sets_by_match: dict[UUID, list] = defaultdict(list)
+        for participant, user in participant_rows:
+            participants_by_match[participant.match_id].append(
+                (participant.to_domain(), user.to_domain())
+            )
+        for item in set_models:
+            sets_by_match[item.match_id].append(item.to_domain())
+        return tuple(
+            MatchView(
+                match=model.to_domain(),
+                participants=tuple(participants_by_match[model.id]),
+                sets=tuple(sets_by_match[model.id]),
+            )
+            for model in models
+        )
 
     async def update_match(
         self,

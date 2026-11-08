@@ -97,3 +97,27 @@ def restore_queue_after_cancel(
     if set((*state.current_pair, *state.waiting)) != set(active_ids):
         raise InvalidQueueStateError("Queue state must contain every active participant once")
     return state
+
+
+def skip_current_players(
+    state: GameSessionQueueState,
+    skipped_participant_ids: Sequence[UUID],
+) -> GameSessionQueueState:
+    """Move one or both current players to the tail and select the next valid pair."""
+    state.validate()
+    skipped = tuple(skipped_participant_ids)
+    if not skipped or len(skipped) > 2 or len(set(skipped)) != len(skipped):
+        raise InvalidQueueStateError("One or two distinct current players must be skipped")
+    if any(participant_id not in state.current_pair for participant_id in skipped):
+        raise InvalidQueueStateError("Only current players can be skipped")
+
+    staying = tuple(item for item in state.current_pair if item not in skipped)
+    ordered = (*staying, *state.waiting, *skipped)
+    if len(ordered) < 2 or len(set(ordered)) != len(ordered):
+        raise InvalidQueueStateError("A new pair requires two distinct active participants")
+    updated = GameSessionQueueState(
+        current_pair=(ordered[0], ordered[1]),
+        waiting=tuple(ordered[2:]),
+    )
+    updated.validate()
+    return updated

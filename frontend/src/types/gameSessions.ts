@@ -94,6 +94,19 @@ export interface SessionMatchListResponse {
   offset: number
 }
 
+export interface SessionPlayerStatistics {
+  user: UserPublicProfile
+  wins: number
+  losses: number
+  points_for: number
+  points_against: number
+  point_difference: number
+}
+
+export interface SessionStatisticsResponse {
+  items: SessionPlayerStatistics[]
+}
+
 export interface SessionMatchCommandResponse {
   match: SessionMatch
   current_match: SessionMatch | null

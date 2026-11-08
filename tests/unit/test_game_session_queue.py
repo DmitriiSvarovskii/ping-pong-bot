@@ -14,6 +14,7 @@ from pingstats.modules.game_sessions.domain import (
     initialize_queue,
     remove_waiting,
     restore_queue_after_cancel,
+    skip_current_players,
 )
 
 
@@ -113,3 +114,49 @@ def test_duplicate_or_inconsistent_queue_state_is_rejected() -> None:
             GameSessionQueueState((UUID(int=1), UUID(int=2)), ()),
             (UUID(int=1), UUID(int=2), UUID(int=3)),
         )
+
+
+def test_skip_first_second_or_both_rotates_deterministically() -> None:
+    state = GameSessionQueueState(
+        (UUID(int=1), UUID(int=2)),
+        (UUID(int=3), UUID(int=4)),
+    )
+
+    assert skip_current_players(state, (UUID(int=1),)) == GameSessionQueueState(
+        (UUID(int=2), UUID(int=3)),
+        (UUID(int=4), UUID(int=1)),
+    )
+    assert skip_current_players(state, (UUID(int=2),)) == GameSessionQueueState(
+        (UUID(int=1), UUID(int=3)),
+        (UUID(int=4), UUID(int=2)),
+    )
+    assert skip_current_players(state, state.current_pair) == GameSessionQueueState(
+        (UUID(int=3), UUID(int=4)),
+        (UUID(int=1), UUID(int=2)),
+    )
+
+
+def test_skip_with_two_or_three_players_never_duplicates_a_participant() -> None:
+    two = GameSessionQueueState((UUID(int=1), UUID(int=2)), ())
+    three = GameSessionQueueState((UUID(int=1), UUID(int=2)), (UUID(int=3),))
+
+    assert skip_current_players(two, (UUID(int=1),)) == GameSessionQueueState(
+        (UUID(int=2), UUID(int=1)), ()
+    )
+    assert skip_current_players(two, two.current_pair) == two
+    assert skip_current_players(three, three.current_pair) == GameSessionQueueState(
+        (UUID(int=3), UUID(int=1)), (UUID(int=2),)
+    )
+
+
+def test_skip_rejects_non_current_or_duplicate_targets() -> None:
+    state = GameSessionQueueState(
+        (UUID(int=1), UUID(int=2)),
+        (UUID(int=3),),
+    )
+    with pytest.raises(InvalidQueueStateError):
+        skip_current_players(state, ())
+    with pytest.raises(InvalidQueueStateError):
+        skip_current_players(state, (UUID(int=3),))
+    with pytest.raises(InvalidQueueStateError):
+        skip_current_players(state, (UUID(int=1), UUID(int=1)))

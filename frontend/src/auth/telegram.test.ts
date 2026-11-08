@@ -15,6 +15,49 @@ describe('initializeTelegram', () => {
     delete window.Telegram
     expect(initializeTelegram()).toEqual({ initData: '', isAvailable: false })
   })
+
+  it('requests fullscreen once on a supported mobile Telegram client', () => {
+    const requestFullscreen = vi.fn()
+    const expand = vi.fn()
+    const webApp = {
+      initData: 'signed-raw-data',
+      colorScheme: 'dark' as const,
+      platform: 'android',
+      version: '9.0',
+      ready: vi.fn(),
+      expand,
+      requestFullscreen,
+      isVersionAtLeast: vi.fn(() => true),
+    }
+    window.Telegram = { WebApp: webApp }
+
+    initializeTelegram()
+    initializeTelegram()
+
+    expect(requestFullscreen).toHaveBeenCalledOnce()
+    expect(expand).not.toHaveBeenCalled()
+  })
+
+  it('uses expand without requesting fullscreen on Telegram Desktop', () => {
+    const requestFullscreen = vi.fn()
+    const expand = vi.fn()
+    window.Telegram = {
+      WebApp: {
+        initData: 'signed-raw-data',
+        colorScheme: 'light',
+        platform: 'tdesktop',
+        version: '9.0',
+        ready: vi.fn(),
+        expand,
+        requestFullscreen,
+      },
+    }
+
+    initializeTelegram()
+
+    expect(requestFullscreen).not.toHaveBeenCalled()
+    expect(expand).toHaveBeenCalledOnce()
+  })
 })
 
 describe('session invitations', () => {

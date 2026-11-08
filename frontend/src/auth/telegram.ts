@@ -3,14 +3,37 @@ export interface TelegramContext {
   isAvailable: boolean
 }
 
+const initializedViewports = new WeakSet<TelegramWebApp>()
+const mobilePlatforms = new Set(['android', 'android_x', 'ios'])
+
 export function initializeTelegram(): TelegramContext {
   const webApp = window.Telegram?.WebApp
   if (!webApp) {
     return { initData: '', isAvailable: false }
   }
   webApp.ready()
-  webApp.expand()
+  initializeViewport(webApp)
   return { initData: webApp.initData, isAvailable: true }
+}
+
+function initializeViewport(webApp: TelegramWebApp) {
+  if (initializedViewports.has(webApp)) return
+  initializedViewports.add(webApp)
+
+  const supportsFullscreen =
+    mobilePlatforms.has(webApp.platform) &&
+    typeof webApp.requestFullscreen === 'function' &&
+    (webApp.isVersionAtLeast?.('8.0') ?? true)
+
+  if (supportsFullscreen) {
+    try {
+      webApp.requestFullscreen?.()
+      return
+    } catch {
+      // Older or partially supported clients may expose the method but reject the request.
+    }
+  }
+  webApp.expand()
 }
 
 export function getSessionStartParam(): string | null {

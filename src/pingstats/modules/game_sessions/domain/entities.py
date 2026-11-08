@@ -28,6 +28,7 @@ class GameSessionEventType(StrEnum):
     ROTATION = "rotation"
     PLAYER_LEFT_QUEUE = "player_left_queue"
     CURRENT_GAME_CANCELLED = "current_game_cancelled"
+    CURRENT_GAME_SKIPPED = "current_game_skipped"
     MATCH_STARTED = "match_started"
     MATCH_CANCELLED = "match_cancelled"
 

@@ -7,6 +7,7 @@ import type {
   SessionMatchListResponse,
   SessionParticipantListResponse,
   SessionQueue,
+  SessionStatisticsResponse,
   SetScoreInput,
 } from '../types/gameSessions'
 import { ApiError, type ApiClient } from './client'
@@ -53,6 +54,12 @@ export function listSessionMatches(client: ApiClient, sessionId: string, signal?
   )
 }
 
+export function getSessionStatistics(client: ApiClient, sessionId: string, signal?: AbortSignal) {
+  return client.request<SessionStatisticsResponse>(`/game-sessions/${sessionId}/statistics`, {
+    signal,
+  })
+}
+
 export async function getCurrentSessionMatch(
   client: ApiClient,
   sessionId: string,
@@ -94,5 +101,24 @@ export function cancelCurrentMatch(
   return client.request<SessionMatchCommandResponse>(
     `/game-sessions/${sessionId}/matches/current/${action}`,
     { method: 'POST', body: { match_id: matchId } },
+  )
+}
+
+export function skipCurrentMatch(
+  client: ApiClient,
+  sessionId: string,
+  matchId: string,
+  skippedPlayerId: string | null,
+) {
+  return client.request<SessionMatchCommandResponse>(
+    `/game-sessions/${sessionId}/matches/current/skip`,
+    {
+      method: 'POST',
+      body: {
+        match_id: matchId,
+        skipped_player_id: skippedPlayerId,
+        skip_both: skippedPlayerId === null,
+      },
+    },
   )
 }

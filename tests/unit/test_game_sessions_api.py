@@ -11,6 +11,7 @@ from pingstats.modules.auth.dependencies import get_current_user
 from pingstats.modules.game_sessions.application.dto import (
     GameSessionMatchResult,
     GameSessionParticipantItem,
+    GameSessionPlayerStatistics,
     GameSessionQueueView,
     GameSessionView,
 )
@@ -208,6 +209,25 @@ class FakeGameSessionService:
         del sessions, matches, kwargs
         return (self.fixture.completed, self.fixture.current), 2
 
+    async def get_session_statistics(self, sessions, matches, **kwargs):
+        del sessions, matches, kwargs
+        return (
+            GameSessionPlayerStatistics(
+                user=self.fixture.organizer,
+                wins=1,
+                losses=0,
+                points_for=11,
+                points_against=5,
+            ),
+            GameSessionPlayerStatistics(
+                user=self.fixture.opponent,
+                wins=0,
+                losses=1,
+                points_for=5,
+                points_against=11,
+            ),
+        )
+
     async def get_current_session_match(self, sessions, matches, **kwargs):
         del sessions, matches, kwargs
         return self.fixture.current
@@ -233,6 +253,12 @@ class FakeGameSessionService:
     async def cancel_current_match_and_leave(self, uow, **kwargs):
         del uow, kwargs
         return GameSessionMatchResult(self.fixture.completed, None, None)
+
+    async def skip_current_match(self, uow, **kwargs):
+        del uow, kwargs
+        return GameSessionMatchResult(
+            self.fixture.completed, self.fixture.current, self.fixture.queue
+        )
 
 
 def configured_app(fixture: SessionApiFixture, service) -> object:
@@ -277,6 +303,7 @@ async def test_all_game_session_routes_require_jwt() -> None:
             await client.get(f"/api/v1/game-sessions/{session_id}/participants"),
             await client.get(f"/api/v1/game-sessions/{session_id}/queue"),
             await client.get(f"/api/v1/game-sessions/{session_id}/matches"),
+            await client.get(f"/api/v1/game-sessions/{session_id}/statistics"),
             await client.get(f"/api/v1/game-sessions/{session_id}/matches/current"),
             await client.post(
                 f"/api/v1/game-sessions/{session_id}/matches/current/sets", json=score
@@ -292,6 +319,10 @@ async def test_all_game_session_routes_require_jwt() -> None:
             await client.post(
                 f"/api/v1/game-sessions/{session_id}/matches/current/cancel-and-leave",
                 json={"match_id": str(match_id)},
+            ),
+            await client.post(
+                f"/api/v1/game-sessions/{session_id}/matches/current/skip",
+                json={"match_id": str(match_id), "skip_both": True},
             ),
         ]
 
@@ -317,6 +348,7 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
         participants = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/participants")
         queue = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/queue")
         matches = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/matches")
+        statistics = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/statistics")
         current = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/matches/current")
 
     assert created.status_code == 201
@@ -327,6 +359,14 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
     assert len(queue.json()["current_pair"]) == 2
     assert queue.json()["waiting"] == []
     assert [item["sequence_number"] for item in matches.json()["items"]] == [1, 2]
+    assert statistics.json()["items"][0] == {
+        "user": statistics.json()["items"][0]["user"],
+        "wins": 1,
+        "losses": 0,
+        "points_for": 11,
+        "points_against": 5,
+        "point_difference": 6,
+    }
     assert current.json()["id"] == str(fixture.current.match.id)
     assert [action for action, _ in service.actions] == [
         "create",
@@ -376,6 +416,14 @@ async def test_result_retry_cancel_and_paused_responses() -> None:
             f"/api/v1/game-sessions/{fixture.session_id}/matches/current/cancel-and-leave",
             json={"match_id": str(match_id)},
         )
+        skipped = await client.post(
+            f"/api/v1/game-sessions/{fixture.session_id}/matches/current/skip",
+            json={"match_id": str(match_id), "skipped_player_id": str(fixture.organizer.id)},
+        )
+        invalid_skip = await client.post(
+            f"/api/v1/game-sessions/{fixture.session_id}/matches/current/skip",
+            json={"match_id": str(match_id), "skip_both": False},
+        )
 
     assert added.status_code == 200
     assert recorded.status_code == 200
@@ -385,6 +433,8 @@ async def test_result_retry_cancel_and_paused_responses() -> None:
     assert cancelled.status_code == 200
     assert left.json()["current_match"] is None
     assert left.json()["queue"] is None
+    assert skipped.status_code == 200
+    assert invalid_skip.status_code == 422
 
 
 async def test_paused_queue_is_explicitly_empty() -> None:
@@ -484,11 +534,13 @@ def test_openapi_contains_all_game_session_routes_and_schemas() -> None:
         "/api/v1/game-sessions/{session_id}/participants",
         "/api/v1/game-sessions/{session_id}/queue",
         "/api/v1/game-sessions/{session_id}/matches",
+        "/api/v1/game-sessions/{session_id}/statistics",
         "/api/v1/game-sessions/{session_id}/matches/current",
         "/api/v1/game-sessions/{session_id}/matches/current/sets",
         "/api/v1/game-sessions/{session_id}/matches/current/result",
         "/api/v1/game-sessions/{session_id}/matches/current/cancel",
         "/api/v1/game-sessions/{session_id}/matches/current/cancel-and-leave",
+        "/api/v1/game-sessions/{session_id}/matches/current/skip",
     } <= paths
     assert {
         "SessionCreateRequest",
@@ -498,6 +550,8 @@ def test_openapi_contains_all_game_session_routes_and_schemas() -> None:
         "SessionMatchResponse",
         "SessionSetRequest",
         "SessionResultRequest",
+        "SessionSkipRequest",
+        "SessionStatisticsResponse",
     } <= set(schema["components"]["schemas"])
     operation = schema["paths"]["/api/v1/game-sessions/{session_id}/matches/current/result"]["put"]
     assert {"400", "401", "403", "404", "409", "422"} <= set(operation["responses"])

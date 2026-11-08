@@ -29,6 +29,7 @@ from pingstats.modules.game_sessions.infrastructure.models import (
 )
 from pingstats.modules.matches.domain import MatchStatus
 from pingstats.modules.matches.infrastructure.models import MatchModel, MatchParticipantModel
+from pingstats.modules.users.domain import User
 from pingstats.modules.users.infrastructure.models import UserModel
 
 
@@ -378,6 +379,21 @@ class SqlAlchemyGameSessionRepository:
             ),
             int(total or 0),
         )
+
+    async def list_historical_users(self, session_id: UUID) -> Sequence[User]:
+        models = (
+            await self._session.scalars(
+                select(UserModel)
+                .join(
+                    GameSessionParticipantModel,
+                    GameSessionParticipantModel.user_id == UserModel.id,
+                )
+                .where(GameSessionParticipantModel.session_id == session_id)
+                .distinct()
+                .order_by(UserModel.id)
+            )
+        ).all()
+        return tuple(model.to_domain() for model in models)
 
 
 class SqlAlchemyCurrentSessionMatchChecker:

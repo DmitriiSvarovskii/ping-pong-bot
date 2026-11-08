@@ -74,6 +74,10 @@
 | PS-008.1 | Telegram Mini App Authentication — завершено | Безопасный production-вход через подписанный initData | PS-004, PS-007 | Official HMAC validation, auth_date freshness, Telegram user upsert, JWT endpoint, unit/API/PostgreSQL race tests | Подделки и stale/future data отклоняются; concurrent first login создаёт одного user; regression/quality checks проходят |
 | PS-008.2a | React Mini App Foundation — завершено | Mobile shell, Telegram login и профиль | PS-008.1 | React/TypeScript/Vite, Router, Query, Tailwind, official Telegram SDK, typed Fetch client, memory-only JWT, development login, tests | Production build не содержит dev-login; Telegram bootstrap/profile/navigation states проходят build/lint/tests |
 | PS-008.2b | Game Sessions Frontend MVP — завершено | Полный mobile UI существующего session API | PS-008.2a, PS-007.5b | Create/list/detail/join/invite, live queue/participants/history, lifecycle actions, full result, stale-state protection, polling/invalidation, frontend tests | Backend остаётся source of truth; invite/join и 409 recovery проверены; build/lint/tests и локальный smoke проходят |
+| PS-009.1 | Улучшение мобильного интерфейса — завершено | Улучшить fullscreen, safe areas, ввод счёта и навигацию результата | PS-008.2b | Mobile-only Telegram fullscreen с fallback, Telegram Back Button, integer score editor с временно пустым значением, горизонтальные action rows, frontend tests | Desktop/browser остаются безопасны; Back Button очищается; test/lint/production build проходят |
+| PS-009.2 | Пропуск матча и управление ротацией — завершено | Явно выбрать уходящих со стола без результата матча | PS-009.1, PS-007.5b | Pure skip rotation, atomic backend command/API/audit, first/second/both modal, concurrency/rollback/frontend tests | Cancel semantics сохранена; stale/concurrent skip не создаёт второй active match; проверки проходят |
+| PS-009.3 | История матчей и статистика сессии — завершено | Показать время завершения и session-only лидерборд | PS-009.2 | Derived read projection из historical participants/completed matches/sets, bulk PostgreSQL loading, top-5 mobile UI, query invalidation, tests | Вышедшие/нулевые участники сохранены; cancel/skip исключены; API/frontend/build/quality checks проходят |
+| PS-009.5.1 | Финальная проверка и подготовка релиза — завершено | Проверить совместимость и регрессии PS-009.1–009.3 | PS-009.3 | Полные backend/frontend/PostgreSQL/concurrency/Alembic/git checks; release-only bug fixes | Все проверки проходят; ошибки statistics API имеют retry UI; миграции и инфраструктурные изменения не требуются |
 
 ## Этап 6 — турниры
 
@@ -121,5 +125,5 @@
 
 ## Следующая задача
 
-PS-008.2b завершён и готов к приёмке. Следующую задачу не начинать автоматически; её объём задаёт
-заказчик отдельной командой.
+PS-009.5.1 завершён. Проект готов к отдельному этапу PS-009.5.2, но публикацию не начинать без
+явной команды заказчика.

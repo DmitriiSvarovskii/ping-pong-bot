@@ -206,6 +206,12 @@ allocate next sequence; create next active match; commit once
 остаётся приостановленной без current match. Следующий join повторно инициализирует пару и создаёт
 матч с очередным, а не повторным номером. Organizer обычным leave не пользуется.
 
+Отдельная команда `skip_current_match` не меняет семантику cancel. Под теми же session/match locks
+она отменяет current match, применяет чистую domain-функцию skip к существующему queue state,
+записывает `current_game_skipped` snapshot и создаёт ровно один successor. Один пропущенный игрок
+уходит в хвост после waiting; при выборе обоих порядок хвоста детерминирован как player1, затем
+player2. Stale/repeated request получает 409 и не вращает уже новую пару.
+
 Завершение active-сессии организатором атомарно отменяет незавершённый current match без поражения
 и переводит сессию в `completed`; после этого active match нет, а вся история матчей и очереди сохранена.
 UNIQUE ledger `(session_id,result_id)`, где `result_id` равен UUID завершённого матча, делает retry
@@ -217,7 +223,14 @@ PS-007.5 публикует этот application workflow через JWT-защ�
 Read-only история использует тот же `MatchRepository`, сортирует только по `sequence_number` и
 проверяет участие через `GameSessionService`. PostgreSQL-backed HTTP acceptance подтверждает полный
 трёхпользовательский flow, pause/resume, permissions, idempotent retry, rollback fault injection и
-гонки result/cancel/complete/join/leave без второго active match или потерянного участника.
+гонки result/cancel/skip/complete/join/leave без второго active match или потерянного участника.
+
+PS-009.3 добавляет read-only session statistics projection. Application-функция получает все
+исторические profiles участников и только завершённые session matches с participants/sets, считает
+результат без записи и детерминированно сортирует его. PostgreSQL adapter загружает matches,
+participants/users и sets тремя bulk-запросами независимо от числа матчей; N+1 отсутствует.
+Отдельный `/statistics` endpoint использует те же access checks. Frontend polling и общая session
+query invalidation обновляют историю и лидерборд после результата, а cancel/skip не меняют проекцию.
 
 ## 8. Турнир single elimination
 

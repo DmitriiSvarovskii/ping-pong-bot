@@ -19,6 +19,7 @@ from pingstats.modules.game_sessions.domain import (
     GameSessionStatus,
 )
 from pingstats.modules.matches.application.ports import MatchRepository
+from pingstats.modules.users.domain import User
 
 
 class GameSessionRepository(Protocol):
@@ -106,6 +107,8 @@ class GameSessionRepository(Protocol):
         limit: int,
         offset: int,
     ) -> tuple[Sequence[GameSessionParticipantItem], int]: ...
+
+    async def list_historical_users(self, session_id: UUID) -> Sequence[User]: ...
 
 
 class CurrentSessionMatchChecker(Protocol):
