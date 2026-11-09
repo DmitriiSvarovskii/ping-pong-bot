@@ -63,6 +63,9 @@ npm run lint
 npm run test
 ```
 
+Production build содержит автоматически созданный `version.json`; правила его кеширования и
+безопасная схема публикации описаны в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 Игровые сессии доступны из вкладки **Игры**: создание и список, join по UUID или Telegram
 `startapp`-приглашению, live-очередь, участники, история, lifecycle actions и запись полного
 результата. Frontend использует только существующий `/api/v1/game-sessions` contract. Победитель,
@@ -87,6 +90,7 @@ DB_MAX_OVERFLOW=10
 JWT_SECRET_KEY=replace-with-a-random-secret-of-at-least-32-characters
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
+JWT_REFRESH_TOKEN_EXPIRE_DAYS=30
 WEBSOCKET_TICKET_TTL_SECONDS=30
 WEBSOCKET_HEARTBEAT_INTERVAL_SECONDS=25
 TELEGRAM_BOT_TOKEN=
@@ -132,6 +136,11 @@ Telegram Mini App → initData → FastAPI validation → users upsert → acces
 значение не мешает запуску приложения и локальным тестам, но endpoint безопасно отвечает 503.
 `TELEGRAM_INIT_DATA_MAX_AGE_SECONDS` по умолчанию равен 300. Нельзя логировать или сохранять
 `initData`, bot token и JWT.
+
+Access JWT хранится frontend только в памяти и по умолчанию живёт 60 минут. Telegram/dev login
+устанавливает host-only `HttpOnly`, `SameSite=Strict` refresh-cookie; её lifetime задаёт
+`JWT_REFRESH_TOKEN_EXPIRE_DAYS` (default 30). В production cookie автоматически получает `Secure`,
+поэтому frontend и `/api` должны оставаться на одном HTTPS origin.
 
 Пример формы запроса (значение должно прийти непосредственно из Telegram Mini App):
 

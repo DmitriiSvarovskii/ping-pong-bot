@@ -13,7 +13,8 @@ import { useAuth } from '../auth/AuthProvider'
 export const sessionKeys = {
   all: ['game-sessions'] as const,
   lists: ['game-sessions', 'list'] as const,
-  list: (offset: number) => ['game-sessions', 'list', offset] as const,
+  list: (offset: number, userId = 'anonymous') =>
+    ['game-sessions', 'list', userId, offset] as const,
   session: (id: string) => ['game-sessions', id] as const,
   detail: (id: string) => ['game-sessions', id, 'detail'] as const,
   participants: (id: string) => ['game-sessions', id, 'participants'] as const,

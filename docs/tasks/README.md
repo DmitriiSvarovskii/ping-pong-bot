@@ -88,6 +88,20 @@
 | PS-010.4.3 | Автоматическое обновление игровой сессии — завершено | Синхронизировать detail/result routes без постоянного polling | PS-010.4.2 | Session consumer, prefix invalidation, six REST projections, draft revision guard, race/lifecycle tests | Event/reconnect/fallback coalesce; session switch закрывает socket; cached UX и stale result защищены |
 | PS-010.5.1 | Полная регрессия и аудит PS-010 — завершено с operational warning | Проверить realtime, gameplay, auth и production prerequisites | PS-010.4.3 | Backend/frontend/PostgreSQL/concurrency/Alembic/static/security audit; terminal session-404 fix | Все локальные проверки проходят; deployment требует подтверждения Nginx Upgrade и single-worker Uvicorn |
 
+## Этап 5.2 — надёжность длительной игры и release UX
+
+| ID | Название | Цель | Зависимости | Объём работ | Готово, когда |
+|---|---|---|---|---|---|
+| PS-011.1 | Корректное завершение сессии — завершено | Не учитывать незавершённый current match | PS-010.5.1 | Idempotent completion, cancellation without score, unit/PostgreSQL tests | Сыгранные результаты сохранены; незавершённый матч не влияет на статистику |
+| PS-011.2 | Safe Area — завершено | Исключить перекрытие Telegram chrome | PS-011.1 | Device/content insets, activated/viewport lifecycle, shared layout tests | Insets не дублируются; верх/низ и browser fallback корректны |
+| PS-011.3 | Навигация — завершено | Предсказуемый BackButton и восстановление списка | PS-011.2 | AppShell history/fallback, scroll restoration, root navigation tests | Root скрывает BackButton; detail возвращает состояние и scroll |
+| PS-011.4 | Авторизация без прерывания — завершено | Восстанавливать access JWT и сохранять ввод | PS-011.3 | HttpOnly refresh JWT, single-flight 401 retry, user/match local draft, regression tests | Нет refresh-loop; network error не очищает draft; retry выполняется один раз |
+| PS-011.5 | Mobile zoom — завершено | Устранить случайный iOS zoom | PS-011.4 | Accessible viewport/CSS/input font audit | Double tap и focus не масштабируют UI без запрета accessibility zoom |
+| PS-011.6 | Отображение игроков — завершено | Полные имена и актуальное число участников | PS-011.5 | Adaptive player cards, existing participant projection | Длинные имена переносятся; число обновляется без нового API |
+| PS-011.7 | Infinite history — завершено | Автоматически подгружать историю игр | PS-011.6 | Offset-compatible infinite query, observer, dedup, cached scroll | Pages не дублируются; return/realtime сохраняют список и позицию |
+| PS-011.8 | Frontend update notice — завершено | Безопасно обнаруживать новую сборку | PS-011.7 | Build manifest, lifecycle checks, draft-aware banner, cache runbook | Нет auto-reload; build IDs уникальны; ошибка проверки не блокирует UI |
+| PS-011.9 | Финальный аудит и подготовка релиза — завершено | Закрыть security/release risks PS-011 | PS-011.8 | Full backend/frontend/PostgreSQL/Alembic audit, CSRF hardening, stale draft cleanup, atomic deployment/rollback runbook | Все локальные проверки проходят; deployment выполняется только отдельной командой |
+
 ## Этап 6 — турниры
 
 | ID | Название | Цель | Зависимости | Объём работ | Готово, когда |
@@ -134,6 +148,6 @@
 
 ## Следующая задача
 
-PS-010.5.1 завершён со статусом PASS WITH WARNINGS. Перед deployment необходимо отдельно подтвердить
-production Nginx WebSocket Upgrade/read timeout и запуск ровно одного Uvicorn worker/process.
-Deployment не начинать без отдельной явной команды заказчика.
+PS-011.9 завершён локально. Следующий шаг — отдельное решение о production deployment по
+`docs/DEPLOYMENT.md`: подтвердить Nginx WebSocket Upgrade/read timeout, append-only hashed assets и
+ровно один Uvicorn worker/process. Deployment не начинать без отдельной явной команды заказчика.

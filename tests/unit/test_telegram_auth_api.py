@@ -13,6 +13,11 @@ from httpx import ASGITransport, AsyncClient
 
 from pingstats.app import create_app
 from pingstats.core.config import AppEnvironment, Settings
+from pingstats.modules.auth.api import (
+    REFRESH_COOKIE_NAME,
+    REFRESH_CSRF_HEADER,
+    REFRESH_CSRF_VALUE,
+)
 from pingstats.modules.users.dependencies import get_user_repository, get_users_uow
 from pingstats.modules.users.domain import TelegramUserData, User
 
@@ -127,8 +132,14 @@ async def test_valid_login_syncs_profile_and_issues_compatible_jwt() -> None:
         )
 
     assert login.status_code == 200
-    assert set(login.json()) == {"access_token", "token_type"}
+    assert set(login.json()) == {"access_token", "token_type", "expires_in"}
     assert login.json()["token_type"] == "bearer"
+    assert login.json()["expires_in"] == 3600
+    assert "HttpOnly" in login.headers["set-cookie"]
+    assert "SameSite=strict" in login.headers["set-cookie"]
+    assert "Path=/api/v1/auth" in login.headers["set-cookie"]
+    assert "Max-Age=2592000" in login.headers["set-cookie"]
+    assert "Secure" not in login.headers["set-cookie"]
     assert me.status_code == 200
     assert me.json()["telegram_id"] == 123456789
     assert me.json()["username"] == "alice"
@@ -151,6 +162,61 @@ async def test_repeat_login_updates_profile_without_duplicate_user() -> None:
     assert next(iter(repository.users)) == first_user_id
     assert repository.users[first_user_id].first_name == "Alicia"
     assert repository.users[first_user_id].username == "new_username"
+
+
+async def test_refresh_cookie_renews_access_without_reusing_init_data() -> None:
+    repository = FakeUserRepository()
+    app = make_app(repository)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post("/api/v1/auth/telegram", json={"init_data": signed_init_data()})
+        refreshed = await client.post(
+            "/api/v1/auth/refresh",
+            headers={REFRESH_CSRF_HEADER: REFRESH_CSRF_VALUE},
+        )
+        me = await client.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {refreshed.json()['access_token']}"},
+        )
+
+    assert REFRESH_COOKIE_NAME in login.cookies
+    assert refreshed.status_code == 200
+    assert refreshed.json()["expires_in"] == 3600
+    assert me.status_code == 200
+
+
+async def test_refresh_rejects_missing_or_wrong_token_type() -> None:
+    repository = FakeUserRepository()
+    app = make_app(repository)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post("/api/v1/auth/telegram", json={"init_data": signed_init_data()})
+        access_token = login.json()["access_token"]
+        client.cookies.clear()
+        missing = await client.post(
+            "/api/v1/auth/refresh",
+            headers={REFRESH_CSRF_HEADER: REFRESH_CSRF_VALUE},
+        )
+        client.cookies.set(REFRESH_COOKIE_NAME, access_token, path="/api/v1/auth")
+        wrong_type = await client.post(
+            "/api/v1/auth/refresh",
+            headers={REFRESH_CSRF_HEADER: REFRESH_CSRF_VALUE},
+        )
+
+    assert missing.status_code == wrong_type.status_code == 401
+    assert missing.json()["error"]["code"] == "refresh_authentication_invalid"
+
+
+async def test_refresh_rejects_cookie_request_without_csrf_header() -> None:
+    repository = FakeUserRepository()
+    app = make_app(repository)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/auth/telegram", json={"init_data": signed_init_data()})
+        rejected = await client.post("/api/v1/auth/refresh")
+
+    assert rejected.status_code == 403
+    assert rejected.json()["error"]["code"] == "refresh_csrf_rejected"
 
 
 async def test_invalid_init_data_and_missing_configuration_are_safe() -> None:
@@ -188,7 +254,12 @@ async def test_telegram_route_exists_in_production_while_dev_login_does_not() ->
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         dev = await client.post("/api/v1/auth/dev-login")
+        telegram = await client.post(
+            "/api/v1/auth/telegram",
+            json={"init_data": signed_init_data()},
+        )
 
     assert "/api/v1/auth/telegram" in paths
     assert "/api/v1/auth/dev-login" not in paths
     assert dev.status_code == 404
+    assert "Secure" in telegram.headers["set-cookie"]

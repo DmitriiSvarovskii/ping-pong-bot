@@ -17,7 +17,7 @@ export function CreateSessionPage() {
   const [ranked, setRanked] = useState(true)
   const mutation = useMutation({
     mutationFn: () => createSession(apiClient, { name: name.trim() || null, points_to_win: points, sets_to_win: sets, is_ranked: ranked }),
-    onSuccess: (session) => { void queryClient.invalidateQueries({ queryKey: sessionKeys.all }); void navigate(`/games/${session.id}`) },
+    onSuccess: (session) => { void queryClient.invalidateQueries({ queryKey: sessionKeys.all }); void navigate(`/games/${session.id}`, { replace: true }) },
   })
   function submit(event: FormEvent) {
     event.preventDefault()

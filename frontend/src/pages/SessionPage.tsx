@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { useCallback, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { cancelCurrentMatch, skipCurrentMatch, transitionSession } from '../api/gameSessions'
@@ -18,7 +18,6 @@ import {
 } from '../components/SessionUi'
 import { getDisplayName } from '../hooks/useDisplayName'
 import { useGameSession, useInvalidateSession } from '../hooks/useGameSession'
-import { useTelegramBackButton } from '../hooks/useTelegramBackButton'
 import { useSessionRealtime } from '../realtime/useSessionRealtime'
 
 type SessionAction = 'leave' | 'start' | 'complete' | 'cancel' | 'cancel-and-leave'
@@ -30,8 +29,6 @@ export function SessionPage() {
   const data = useGameSession(sessionId)
   useSessionRealtime(sessionId)
   const invalidate = useInvalidateSession()
-  const returnToGames = useCallback(() => { void navigate('/games') }, [navigate])
-  useTelegramBackButton(returnToGames)
   const [shareMessage, setShareMessage] = useState<string | null>(null)
   const [skipOpen, setSkipOpen] = useState(false)
   const mutation = useMutation({
@@ -85,7 +82,7 @@ export function SessionPage() {
     }
   }
 
-  return <div className="page-stack session-page"><header className="session-hero"><div><StatusBadge status={session.status}/><h1>{session.name || 'Игра без названия'}</h1><p>{session.points_to_win} очков · до {session.sets_to_win} побед {session.is_ranked ? '· рейтинговая' : '· нерейтинговая'}</p></div><button className="share-button" onClick={() => void share()}>Пригласить</button>{shareMessage && <small className="share-message">{shareMessage}</small>}</header>
+  return <div className="page-stack session-page"><header className="session-hero"><div><StatusBadge status={session.status}/><h1>{session.name || 'Игра без названия'}</h1><p>{session.points_to_win} очков · до {session.sets_to_win} побед {session.is_ranked ? '· рейтинговая' : '· нерейтинговая'}</p>{session.status === 'active' && <strong className="session-player-count">Игроков: {participants.length}</strong>}</div><button className="share-button" onClick={() => void share()}>Пригласить</button>{shareMessage && <small className="share-message">{shareMessage}</small>}</header>
 
   {mutation.error && <div className="inline-error">{sessionErrorMessage(mutation.error)}</div>}
 

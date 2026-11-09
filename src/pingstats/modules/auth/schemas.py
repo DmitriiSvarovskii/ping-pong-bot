@@ -31,7 +31,12 @@ class TelegramLoginRequest(BaseModel):
 class TelegramTokenResponse(BaseModel):
     access_token: str
     token_type: str
+    expires_in: int
 
     @classmethod
     def from_result(cls, result: LoginResult) -> "TelegramTokenResponse":
-        return cls(access_token=result.access_token, token_type=result.token_type)
+        return cls(
+            access_token=result.access_token,
+            token_type=result.token_type,
+            expires_in=result.expires_in,
+        )

@@ -19,9 +19,13 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   authenticated?: boolean
 }
 
+type AuthenticationRecoveryHandler = () => Promise<string | null>
+
 export class ApiClient {
   #accessToken: string | null = null
   #onUnauthorized: (() => void) | null = null
+  #authenticationRecoveryHandler: AuthenticationRecoveryHandler | null = null
+  #authenticationRecovery: Promise<string | null> | null = null
 
   setAccessToken(token: string | null): void {
     this.#accessToken = token
@@ -31,15 +35,24 @@ export class ApiClient {
     this.#onUnauthorized = handler
   }
 
+  setAuthenticationRecoveryHandler(handler: AuthenticationRecoveryHandler | null): void {
+    this.#authenticationRecoveryHandler = handler
+  }
+
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    return this.#request(path, options, true)
+  }
+
+  async #request<T>(path: string, options: RequestOptions, allowRecovery: boolean): Promise<T> {
     const { body, authenticated = true, headers: suppliedHeaders, ...requestInit } = options
+    const requestToken = authenticated ? this.#accessToken : null
     const headers = new Headers(suppliedHeaders)
     headers.set('Accept', 'application/json')
     if (body !== undefined) {
       headers.set('Content-Type', 'application/json')
     }
-    if (authenticated && this.#accessToken) {
-      headers.set('Authorization', `Bearer ${this.#accessToken}`)
+    if (requestToken) {
+      headers.set('Authorization', `Bearer ${requestToken}`)
     }
 
     const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -49,9 +62,11 @@ export class ApiClient {
     })
 
     if (!response.ok) {
-      if (response.status === 401 && authenticated && this.#accessToken) {
-        this.#accessToken = null
-        this.#onUnauthorized?.()
+      if (response.status === 401 && authenticated && requestToken) {
+        if (allowRecovery && await this.#recoverAuthentication(requestToken)) {
+          return this.#request(path, options, false)
+        }
+        this.#expireRejectedSession(requestToken)
       }
       throw await toApiError(response)
     }
@@ -60,6 +75,26 @@ export class ApiClient {
       return undefined as T
     }
     return (await response.json()) as T
+  }
+
+  async #recoverAuthentication(rejectedToken: string): Promise<boolean> {
+    if (this.#accessToken !== rejectedToken) return this.#accessToken !== null
+    if (!this.#authenticationRecoveryHandler) return false
+    if (!this.#authenticationRecovery) {
+      this.#authenticationRecovery = this.#authenticationRecoveryHandler().finally(() => {
+        this.#authenticationRecovery = null
+      })
+    }
+    const recoveredToken = await this.#authenticationRecovery
+    if (!recoveredToken) return false
+    this.#accessToken = recoveredToken
+    return true
+  }
+
+  #expireRejectedSession(rejectedToken: string): void {
+    if (this.#accessToken !== rejectedToken) return
+    this.#accessToken = null
+    this.#onUnauthorized?.()
   }
 }
 

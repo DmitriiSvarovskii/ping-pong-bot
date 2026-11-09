@@ -50,7 +50,29 @@ it('works safely outside Telegram', () => {
   expect(() => view.unmount()).not.toThrow()
 })
 
-function Harness({ onBack }: { onBack: () => void }) {
-  useTelegramBackButton(onBack)
+it('actively hides the Telegram Back Button when navigation is at a root route', () => {
+  const hide = vi.fn()
+  const onClick = vi.fn()
+  window.Telegram = {
+    WebApp: {
+      initData: 'signed',
+      colorScheme: 'light',
+      platform: 'ios',
+      version: '9.0',
+      ready: vi.fn(),
+      expand: vi.fn(),
+      BackButton: { show: vi.fn(), hide, onClick, offClick: vi.fn() },
+    },
+  }
+
+  const view = render(<Harness onBack={vi.fn()} enabled={false} />)
+
+  expect(hide).toHaveBeenCalledOnce()
+  expect(onClick).not.toHaveBeenCalled()
+  view.unmount()
+})
+
+function Harness({ onBack, enabled = true }: { onBack: () => void; enabled?: boolean }) {
+  useTelegramBackButton(onBack, enabled)
   return null
 }

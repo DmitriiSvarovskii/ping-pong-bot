@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 
 import { ApiClient } from '../api/client'
+import { AppShell } from '../components/AppShell'
 import { SessionQueuePanel } from '../components/SessionQueuePanel'
 import { sessionKeys } from '../hooks/useGameSession'
 import type { CurrentUser } from '../types/api'
@@ -18,6 +19,7 @@ import { CreateSessionPage } from './CreateSessionPage'
 import { ResultPage } from './ResultPage'
 import { SessionInvitePage } from './SessionInvitePage'
 import { SessionPage } from './SessionPage'
+import { loadResultDraft } from './resultDraft'
 
 const auth = vi.hoisted(() => ({
   apiClient: null as ApiClient | null,
@@ -26,6 +28,9 @@ const auth = vi.hoisted(() => ({
 
 vi.mock('../auth/AuthProvider', () => ({
   useAuth: () => ({ apiClient: auth.apiClient as ApiClient, user: auth.user }),
+}))
+vi.mock('../update/useAppUpdate', () => ({
+  useAppUpdate: () => null,
 }))
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111'
@@ -38,6 +43,7 @@ const PARTICIPANTS = [participant('pa', USER_A), participant('pb', USER_B), part
 
 beforeEach(() => {
   delete window.Telegram
+  window.localStorage.clear()
   auth.apiClient = new ApiClient()
   auth.user = { ...USER_A, telegram_id: 1, updated_at: '2026-11-07T10:00:00Z' }
 })
@@ -70,6 +76,77 @@ describe('game sessions frontend', () => {
     expect(screen.getByText('Борис')).toBeInTheDocument()
     expect(screen.getByText('Саша')).toBeInTheDocument()
     expect(screen.getByText('Следующий')).toBeInTheDocument()
+  })
+
+  it('renders full current-pair names with spaces and without spaces', () => {
+    const spacedName = user(USER_A.id, 'Дима', 'Очень Длинная Фамилия')
+    const unbrokenName = user(USER_B.id, 'Сверхдлинноеимябезпробелов')
+    const participants = [participant('pa', spacedName), participant('pb', unbrokenName)]
+    const queue: SessionQueue = {
+      current_pair: [queueItem('pa', spacedName.id), queueItem('pb', unbrokenName.id)],
+      waiting: [],
+      is_paused: false,
+    }
+
+    const { container } = render(
+      <SessionQueuePanel queue={queue} participants={participants} />,
+    )
+
+    const names = [...container.querySelectorAll('.queue-player-name')]
+    expect(names).toHaveLength(2)
+    expect(names[0]).toHaveTextContent('Дима Очень Длинная Фамилия')
+    expect(names[1]).toHaveTextContent('Сверхдлинноеимябезпробелов')
+  })
+
+  it('shows the active participant count and updates it from the existing query', async () => {
+    let activeParticipants = PARTICIPANTS.slice(0, 2)
+    let participantCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({
+          status: 'active',
+          active_participants: activeParticipants,
+        })))
+      }
+      if (url.includes('/participants')) {
+        participantCalls += 1
+        return Promise.resolve(jsonResponse({
+          items: activeParticipants,
+          total: activeParticipants.length,
+          limit: 100,
+          offset: 0,
+        }))
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(jsonResponse({
+          current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)],
+          waiting: [],
+          is_paused: false,
+        }))
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) {
+        return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    const { client } = renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+    expect(await screen.findByText('Игроков: 2')).toBeInTheDocument()
+
+    activeParticipants = PARTICIPANTS
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.participants(SESSION_ID) })
+    })
+
+    expect(await screen.findByText('Игроков: 3')).toBeInTheDocument()
+    expect(participantCalls).toBe(2)
   })
 
   it('renders full current-match names with spaces and without spaces', async () => {
@@ -135,6 +212,99 @@ describe('game sessions frontend', () => {
     expect(await screen.findByRole('heading', { name: 'Анна победил' })).toBeInTheDocument()
   })
 
+  it('restores an unsaved score draft after the result page is remounted', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (requestUrl(input).includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(match()))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    const first = renderRoute(
+      <ResultPage />,
+      `/games/${SESSION_ID}/result`,
+      '/games/:sessionId/result',
+    )
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '8')
+    await waitFor(() => expect(loadResultDraft(USER_A.id, MATCH_ID)).toEqual([
+      { player1_score: 8, player2_score: 0 },
+    ]))
+    first.unmount()
+
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+
+    expect(await screen.findByLabelText('Счёт Анна')).toHaveValue('8')
+  })
+
+  it('removes the score draft after the server accepts the result', async () => {
+    mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '11')
+    await waitFor(() => expect(loadResultDraft(USER_A.id, MATCH_ID)).not.toBeNull())
+
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить результат' }))
+
+    expect(await screen.findByText('РЕЗУЛЬТАТ СОХРАНЁН')).toBeInTheDocument()
+    expect(loadResultDraft(USER_A.id, MATCH_ID)).toBeNull()
+  })
+
+  it('keeps the score draft when result submission loses the network', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, request) => {
+      if (request?.method === 'PUT') return Promise.reject(new TypeError('Offline'))
+      if (requestUrl(input).includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(match()))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '11')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить результат' }))
+
+    expect(await screen.findByText('Проверьте соединение и попробуйте снова.')).toBeInTheDocument()
+    expect(loadResultDraft(USER_A.id, MATCH_ID)).toEqual([
+      { player1_score: 11, player2_score: 0 },
+    ])
+  })
+
+  it('submits the preserved score after transparent access-token recovery', async () => {
+    auth.apiClient?.setAccessToken('expired-token')
+    const recover = vi.fn().mockResolvedValue('renewed-token')
+    auth.apiClient?.setAuthenticationRecoveryHandler(recover)
+    let resultAttempts = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, request) => {
+      if (request?.method === 'PUT') {
+        resultAttempts += 1
+        if (resultAttempts === 1) {
+          return Promise.resolve(jsonResponse({ error: { code: 'token_invalid' } }, 401))
+        }
+        return Promise.resolve(jsonResponse(
+          commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()),
+        ))
+      }
+      if (requestUrl(input).includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(match()))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '11')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить результат' }))
+
+    expect(await screen.findByText('РЕЗУЛЬТАТ СОХРАНЁН')).toBeInTheDocument()
+    expect(recover).toHaveBeenCalledOnce()
+    expect(resultAttempts).toBe(2)
+    expect(loadResultDraft(USER_A.id, MATCH_ID)).toBeNull()
+  })
+
   it('invalidates session statistics after recording a result', async () => {
     mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
     const { client } = renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
@@ -196,8 +366,8 @@ describe('game sessions frontend', () => {
 
     expect(await screen.findByText(`/games/${SESSION_ID}`)).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input, request]) => request?.method === 'PUT' || requestUrl(input).includes('/cancel'))).toBe(false)
-    expect(offClick).toHaveBeenCalledWith(expect.any(Function))
-    expect(hide).toHaveBeenCalledOnce()
+    expect(offClick).not.toHaveBeenCalled()
+    expect(hide).not.toHaveBeenCalled()
   })
 
   it('returns from a session to My Games through Telegram Back Button', async () => {
@@ -256,7 +426,7 @@ describe('game sessions frontend', () => {
     expect(hide).toHaveBeenCalledOnce()
   })
 
-  it('rebinds Telegram Back Button from result to session and then My Games', async () => {
+  it('keeps one Telegram Back Button handler from result to session and My Games', async () => {
     const activeHandlers = new Set<() => void>()
     const onClick = vi.fn((callback: () => void) => activeHandlers.add(callback))
     const offClick = vi.fn((callback: () => void) => activeHandlers.delete(callback))
@@ -304,9 +474,11 @@ describe('game sessions frontend', () => {
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/games/${SESSION_ID}/result`]}>
           <Routes>
-            <Route path="/games/:sessionId/result" element={<ResultPage />} />
-            <Route path="/games/:sessionId" element={<SessionPage />} />
-            <Route path="*" element={<LocationProbe />} />
+            <Route element={<AppShell />}>
+              <Route path="/games/:sessionId/result" element={<ResultPage />} />
+              <Route path="/games/:sessionId" element={<SessionPage />} />
+              <Route path="*" element={<LocationProbe />} />
+            </Route>
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>,
@@ -317,12 +489,14 @@ describe('game sessions frontend', () => {
     act(() => [...activeHandlers][0]?.())
     await screen.findByRole('heading', { name: 'Тестовая игра' })
     expect(activeHandlers.size).toBe(1)
+    expect(onClick).toHaveBeenCalledOnce()
+    expect(offClick).not.toHaveBeenCalled()
 
     act(() => [...activeHandlers][0]?.())
     expect(await screen.findByText('/games')).toBeInTheDocument()
     await waitFor(() => expect(activeHandlers.size).toBe(0))
-    expect(onClick).toHaveBeenCalledTimes(2)
-    expect(offClick).toHaveBeenCalledTimes(2)
+    expect(onClick).toHaveBeenCalledOnce()
+    expect(offClick).toHaveBeenCalledOnce()
   })
 
   it('renders result entry safely without the Telegram API', async () => {
@@ -377,6 +551,7 @@ describe('game sessions frontend', () => {
     const score = await screen.findByLabelText('Счёт Анна')
     await userEvent.clear(score)
     await userEvent.type(score, '7')
+    await waitFor(() => expect(loadResultDraft(USER_A.id, MATCH_ID)).not.toBeNull())
 
     await act(async () => {
       await client.invalidateQueries({ queryKey: sessionKeys.currentMatch(SESSION_ID) })
@@ -402,6 +577,7 @@ describe('game sessions frontend', () => {
     const score = await screen.findByLabelText('Счёт Анна')
     await userEvent.clear(score)
     await userEvent.type(score, '7')
+    await waitFor(() => expect(loadResultDraft(USER_A.id, MATCH_ID)).not.toBeNull())
 
     current = nextMatch()
     await act(async () => {
@@ -411,6 +587,7 @@ describe('game sessions frontend', () => {
     expect(await screen.findByText('МАТЧ #2')).toBeInTheDocument()
     expect(screen.getByLabelText('Счёт Анна')).toHaveValue('0')
     expect(screen.queryByText('Матч уже изменился')).not.toBeInTheDocument()
+    expect(loadResultDraft(USER_A.id, MATCH_ID)).toBeNull()
   })
 
   it('removes result submission when the current match was already completed elsewhere', async () => {
@@ -431,6 +608,7 @@ describe('game sessions frontend', () => {
     const score = await screen.findByLabelText('Счёт Анна')
     await userEvent.clear(score)
     await userEvent.type(score, '7')
+    await waitFor(() => expect(loadResultDraft(USER_A.id, MATCH_ID)).not.toBeNull())
 
     current = null
     await act(async () => {
@@ -439,6 +617,7 @@ describe('game sessions frontend', () => {
 
     expect(await screen.findByText('Активного матча нет')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Сохранить результат' })).not.toBeInTheDocument()
+    expect(loadResultDraft(USER_A.id, MATCH_ID)).toBeNull()
   })
 
   it('joins through an invitation route before opening the protected session', async () => {
@@ -641,7 +820,7 @@ describe('game sessions frontend', () => {
 
 function renderRoute(element: React.ReactNode, initial: string, path = '*') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return { ...render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route path={path} element={element}/><Route path="*" element={<LocationProbe/>}/></Routes></MemoryRouter></QueryClientProvider>), client }
+  return { ...render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route element={<AppShell />}><Route path={path} element={element}/><Route path="*" element={<LocationProbe/>}/></Route></Routes></MemoryRouter></QueryClientProvider>), client }
 }
 
 function LocationProbe() {

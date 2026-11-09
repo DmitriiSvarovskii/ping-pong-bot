@@ -38,8 +38,8 @@ from pingstats.modules.game_sessions.infrastructure.repository import (
 )
 from pingstats.modules.game_sessions.infrastructure.uow import SqlAlchemyGameSessionsUnitOfWork
 from pingstats.modules.matches.application.errors import MatchStateError
-from pingstats.modules.matches.domain import SetScore
-from pingstats.modules.matches.infrastructure.models import MatchModel
+from pingstats.modules.matches.domain import MatchStatus, SetScore
+from pingstats.modules.matches.infrastructure.models import MatchModel, MatchSetModel
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
 from pingstats.modules.users.infrastructure.models import UserModel
 
@@ -277,6 +277,124 @@ async def test_lifecycle_history_events_and_create_rollback_are_transactional(
         }
     )
     assert queue_count == 0
+
+
+async def test_complete_preserves_recorded_match_and_cancels_unfinished_match(
+    session_service_database: tuple[async_sessionmaker[AsyncSession], tuple[UUID, UUID, UUID]],
+) -> None:
+    session_factory, (organizer, player, _) = session_service_database
+    service = GameSessionService()
+    created = await service.create_session(
+        SqlAlchemyGameSessionsUnitOfWork(session_factory), actor_id=organizer
+    )
+    await service.join_session(
+        SqlAlchemyGameSessionsUnitOfWork(session_factory),
+        actor_id=player,
+        session_id=created.session.id,
+    )
+    await service.start_session(
+        SqlAlchemyGameSessionsUnitOfWork(session_factory),
+        actor_id=organizer,
+        session_id=created.session.id,
+    )
+    async with session_factory() as session:
+        first_match = await SqlAlchemyMatchRepository(session).get_current_for_session(
+            created.session.id
+        )
+    assert first_match is not None
+
+    recorded = await service.record_session_result(
+        SqlAlchemyGameSessionsUnitOfWork(session_factory),
+        actor_id=player,
+        session_id=created.session.id,
+        match_id=first_match.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    assert recorded.current_match is not None
+    unfinished_match_id = recorded.current_match.match.id
+    completed = await service.complete_session(
+        SqlAlchemyGameSessionsUnitOfWork(session_factory),
+        actor_id=organizer,
+        session_id=created.session.id,
+    )
+    assert completed.session.status is GameSessionStatus.COMPLETED
+
+    async with session_factory() as session:
+        sessions = SqlAlchemyGameSessionRepository(session)
+        matches = SqlAlchemyMatchRepository(session)
+        history, total = await service.list_session_matches(
+            sessions,
+            matches,
+            actor_id=organizer,
+            session_id=created.session.id,
+            limit=20,
+            offset=0,
+        )
+        statistics = await service.get_session_statistics(
+            sessions,
+            matches,
+            actor_id=organizer,
+            session_id=created.session.id,
+        )
+        unfinished_set_count = await session.scalar(
+            select(func.count())
+            .select_from(MatchSetModel)
+            .where(MatchSetModel.match_id == unfinished_match_id)
+        )
+        completion_event_count = await session.scalar(
+            select(func.count())
+            .select_from(GameSessionQueueEventModel)
+            .where(
+                GameSessionQueueEventModel.session_id == created.session.id,
+                GameSessionQueueEventModel.event_type == GameSessionEventType.COMPLETED.value,
+            )
+        )
+
+    assert total == 2
+    assert [view.match.status for view in history] == [
+        MatchStatus.COMPLETED,
+        MatchStatus.CANCELLED,
+    ]
+    assert history[0].match.id == first_match.match.id
+    assert history[0].match.winner_id == organizer
+    assert [item.score() for item in history[0].sets] == [SetScore(11, 4)]
+    assert history[1].match.id == unfinished_match_id
+    assert history[1].match.winner_id is None
+    assert history[1].match.completed_at is None
+    assert history[1].match.cancelled_at is not None
+    assert unfinished_set_count == 0
+    assert completion_event_count == 1
+
+    by_user = {item.user.id: item for item in statistics}
+    assert (by_user[organizer].wins, by_user[organizer].losses) == (1, 0)
+    assert (by_user[player].wins, by_user[player].losses) == (0, 1)
+
+    with pytest.raises(GameSessionStateError):
+        await service.complete_session(
+            SqlAlchemyGameSessionsUnitOfWork(session_factory),
+            actor_id=organizer,
+            session_id=created.session.id,
+        )
+
+    async with session_factory() as session:
+        sessions = SqlAlchemyGameSessionRepository(session)
+        matches = SqlAlchemyMatchRepository(session)
+        repeated_statistics = await service.get_session_statistics(
+            sessions,
+            matches,
+            actor_id=organizer,
+            session_id=created.session.id,
+        )
+        repeated_completion_event_count = await session.scalar(
+            select(func.count())
+            .select_from(GameSessionQueueEventModel)
+            .where(
+                GameSessionQueueEventModel.session_id == created.session.id,
+                GameSessionQueueEventModel.event_type == GameSessionEventType.COMPLETED.value,
+            )
+        )
+    assert repeated_statistics == statistics
+    assert repeated_completion_event_count == 1
 
 
 async def test_queue_rotation_leave_restore_and_idempotency_are_transactional(

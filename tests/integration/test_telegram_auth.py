@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from pingstats.app import create_app
 from pingstats.core.config import AppEnvironment, Settings
 from pingstats.infrastructure.database.engine import Database
+from pingstats.modules.auth.api import REFRESH_CSRF_HEADER, REFRESH_CSRF_VALUE
 from pingstats.modules.auth.application import TokenService
 from pingstats.modules.users.infrastructure.models import UserModel
 
@@ -130,8 +131,14 @@ async def test_telegram_login_creates_updates_and_reuses_user(
     second_user_id = TokenService(
         secret=JWT_SECRET, algorithm="HS256", expire_minutes=60
     ).verify_access_token(updated.json()["access_token"])
+    refreshed = await env.client.post(
+        "/api/v1/auth/refresh",
+        headers={REFRESH_CSRF_HEADER: REFRESH_CSRF_VALUE},
+    )
+    assert refreshed.status_code == 200, refreshed.text
     me = await env.client.get(
-        "/api/v1/users/me", headers={"Authorization": f"Bearer {updated.json()['access_token']}"}
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {refreshed.json()['access_token']}"},
     )
 
     assert first_user_id == second_user_id

@@ -1,6 +1,7 @@
 export interface TelegramTokenResponse {
   access_token: string
   token_type: 'bearer'
+  expires_in: number
 }
 
 export interface DevelopmentTokenResponse extends TelegramTokenResponse {

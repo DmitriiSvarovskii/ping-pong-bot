@@ -9,6 +9,10 @@ const dynamicProperties = [
   '--app-telegram-content-safe-area-inset-right',
   '--app-telegram-content-safe-area-inset-bottom',
   '--app-telegram-content-safe-area-inset-left',
+  '--app-telegram-safe-content-inset-top',
+  '--app-telegram-safe-content-inset-right',
+  '--app-telegram-safe-content-inset-bottom',
+  '--app-telegram-safe-content-inset-left',
   '--app-telegram-viewport-height',
 ]
 
@@ -108,6 +112,10 @@ describe('initializeTelegram', () => {
       .toBe('24px')
     expect(document.documentElement.style.getPropertyValue('--app-telegram-content-safe-area-inset-top'))
       .toBe('52px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-top'))
+      .toBe('76px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-bottom'))
+      .toBe('28px')
     expect(document.documentElement.style.getPropertyValue('--app-telegram-viewport-height'))
       .toBe('700px')
 
@@ -122,8 +130,23 @@ describe('initializeTelegram', () => {
       .toBe('30px')
     expect(document.documentElement.style.getPropertyValue('--app-telegram-content-safe-area-inset-top'))
       .toBe('64px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-top'))
+      .toBe('94px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-bottom'))
+      .toBe('32px')
     expect(document.documentElement.style.getPropertyValue('--app-telegram-viewport-height'))
       .toBe('430px')
+
+    bridge.values.safeAreaInset = { top: 31, right: 1, bottom: 21, left: 1 }
+    bridge.values.contentSafeAreaInset = { top: 65, right: 2, bottom: 13, left: 2 }
+    bridge.values.viewportHeight = 690
+    bridge.emit('activated')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-top'))
+      .toBe('96px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-safe-content-inset-bottom'))
+      .toBe('34px')
+    expect(document.documentElement.style.getPropertyValue('--app-telegram-viewport-height'))
+      .toBe('690px')
     telegram.cleanup()
   })
 
@@ -133,12 +156,12 @@ describe('initializeTelegram', () => {
 
     const first = initializeTelegram()
     const second = initializeTelegram()
-    expect(bridge.onEvent).toHaveBeenCalledTimes(3)
+    expect(bridge.onEvent).toHaveBeenCalledTimes(4)
 
     first.cleanup()
     expect(bridge.offEvent).not.toHaveBeenCalled()
     second.cleanup()
-    expect(bridge.offEvent).toHaveBeenCalledTimes(3)
+    expect(bridge.offEvent).toHaveBeenCalledTimes(4)
 
     bridge.values.viewportHeight = 300
     bridge.emit('viewportChanged')

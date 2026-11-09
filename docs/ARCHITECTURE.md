@@ -323,6 +323,13 @@ Downstream match после исправления не удаляется. Ес
   сохраняет UUID и остальные пользовательские данные, а `last_active_at` обновляется монотонно.
 - `TELEGRAM_BOT_TOKEN` может отсутствовать при старте; в этом случае только Telegram-auth отвечает
   безопасным 503. Bot token, полный initData и JWT не попадают в логи или HTTP errors.
+- Access JWT остаётся короткоживущим (`JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, default 60) и хранится
+  frontend только в памяти. Login дополнительно устанавливает подписанный refresh JWT в host-only
+  `HttpOnly`, `SameSite=Strict`, production-`Secure` cookie с отдельным configurable lifetime.
+  `/auth/refresh` требует нестандартный same-origin header `X-PingStats-CSRF`, проверяет
+  тип/подпись/срок и существование user, после чего выдаёт только новый access JWT; повторная
+  проверка Telegram `initData` не требуется. CORS middleware отсутствует, поэтому сторонний origin
+  не может прочитать ответ или пройти preflight с этим header.
 
 ### 10.1. Mini App bootstrap
 
@@ -330,6 +337,19 @@ Downstream match после исправления не удаляется. Ес
 `WebApp.ready()`/`expand()`, читает только raw `WebApp.initData` и передаёт его в
 `POST /auth/telegram`; `initDataUnsafe` не является источником identity. После ответа JWT остаётся
 в памяти, а профиль загружается через `GET /users/me`. Есть loading/error/retry states.
+
+`ApiClient` обрабатывает access-token expiry прозрачно. Первый authenticated 401 запускает один
+single-flight `POST /auth/refresh`; параллельные запросы ожидают тот же Promise и повторяются один
+раз только после нового access token. Повторный 401 не создаёт цикл. Invalid refresh завершает
+frontend session, а network failure сохраняет её для последующей попытки. Поэтому ticket-запросы
+RealtimeClient используют тот же recovery flow; открытый WebSocket не зависит от access JWT, а
+reconnect получает ticket уже с обновлённым token.
+
+Форма результата хранит неофициальный draft в browser `localStorage` по ключу `(user UUID, match
+UUID)`. Draft содержит только введённые партии, восстанавливается после reload/reopen, не участвует
+в REST/statistics и удаляется после подтверждённого server response либо подтверждённой REST/realtime
+смены текущего матча. Новый match UUID и другой user используют другие ключи; transport/401/сетевые
+ошибки draft не очищают.
 
 При отсутствии initData production не пытается имитировать Telegram и показывает инструкцию
 открыть Mini App. Development build может динамически загрузить adapter фиксированного
@@ -340,19 +360,37 @@ responsive mobile layout.
 Telegram viewport инициализируется централизованно в auth bootstrap. На мобильных клиентах bridge
 однократно вызывает `disableVerticalSwipes()` при наличии Bot API 7.7+, затем сохраняет прежнюю
 стратегию `requestFullscreen()` для Bot API 8.0+ с `expand()` как fallback. Один ref-counted
-controller подписывается на `viewportChanged`, `safeAreaChanged` и `contentSafeAreaChanged`,
-синхронизирует значения bridge в CSS variables и снимает подписки после последнего consumer.
-Layout выбирает максимум между browser `env(safe-area-inset-*)`, Telegram CSS variables и
-динамическими bridge values: insets не складываются и поэтому не применяются дважды. Высота
+controller подписывается на `viewportChanged`, `activated`, `safeAreaChanged` и
+`contentSafeAreaChanged`, синхронизирует значения bridge в CSS variables и снимает подписки после
+последнего consumer. Device safe area и content safe area Telegram складываются как независимые
+слои; затем layout выбирает максимум между browser `env(safe-area-inset-*)`, суммой Telegram CSS
+variables и суммой динамических bridge values. Поэтому оба вида inset учитываются, но один источник
+не применяется дважды. Высота
 `viewportHeight` обновляет shell, включая изменение viewport при появлении клавиатуры; вертикальная
 прокрутка остаётся нативной и не перехватывает touch-события.
 
 Глобальная типографика Mini App использует локальные WOFF2 subsets Montserrat для кириллицы и
 латиницы с диапазоном weights 400–700 и системным sans-serif fallback; runtime-запросов к font CDN
-нет. Route-level страницы используют единый `useTelegramBackButton`: форма результата возвращает в
-сессию, а сессия — в `/games`. Hook держит один bridge-handler, читает актуальный callback через ref
-и симметрично выполняет `onClick`/`offClick`, поэтому переходы между этими страницами не накапливают
-обработчики.
+нет. `AppShell` централизованно управляет `useTelegramBackButton`: на `/`, `/games` и `/profile`
+системная кнопка скрыта, на вложенных маршрутах один bridge-handler возвращает по history роутера.
+При прямом открытии без внутренней history entry применяется route-specific fallback: result →
+session, остальные game-session screens → `/games`, неизвестный маршрут → `/`. Список сессий
+использует `useInfiniteQuery`: `offset` из query string задаёт начальную страницу для совместимости
+прямых ссылок, а следующие страницы загружаются `IntersectionObserver` без изменения URL/history.
+TanStack Query сохраняет массив загруженных страниц и дедуплицирует UI по session UUID, а scroll
+position привязана к ключу history entry в `sessionStorage`. Infinite-list cache не удаляется до
+завершения текущего frontend runtime, чтобы длительная игра не уничтожила историю исходного экрана.
+Поэтому возврат восстанавливает список и прокрутку без отдельного navigation stack; повторный выбор
+активной нижней вкладки не создаёт entry.
+
+Каждая production-сборка Vite генерирует уникальный build ID, одновременно встраивает его в bundle
+и публикует `/version.json`. Один lifecycle-aware controller проверяет manifest с `cache: no-store`
+при старте, раз в 15 минут и после возврата document в visible; concurrent check, повторные таймеры
+и listeners исключены, unmount abort-ит запрос. Отличающийся ID показывает неблокирующий banner в
+`AppShell`, но никогда не перезагружает приложение автоматически. Перед явным reload frontend
+проверяет содержательный result draft текущего user; при его наличии требуется подтверждение, а сам
+draft остаётся в `localStorage`. После reload AuthProvider восстанавливает access JWT через HttpOnly
+refresh cookie, и актуальный match UUID получает прежний draft.
 
 PS-010.4.1 добавляет общий frontend слой `src/realtime`. `RealtimeClient` получает ticket
 существующим memory-token `ApiClient`, строит
@@ -371,11 +409,12 @@ React hook использует generation guards и callback refs, поэтом
 
 PS-010.4.2 подключает list channel к `/games` через тот же `useRealtimeChannel`. Consumer включён
 только при `authenticated`, а `sessions.updated`, successful open/reconnect и fallback помечают
-устаревшим list-prefix и выполняют один coalesced refetch активного key
-`['game-sessions', 'list', offset]`. REST остаётся
-источником данных; heartbeat/unknown/malformed transport не доходят до invalidation. Offset и
-кешированные данные не сбрасываются, background error не заменяет уже показанный список, а
-AbortSignal отменяет refetch после смены страницы/logout.
+устаревшим list-prefix и выполняют один coalesced refetch активного infinite-query key
+`['game-sessions', 'list', userId, initialOffset]`. REST остаётся источником данных;
+heartbeat/unknown/malformed transport не доходят до invalidation. Все уже загруженные offset-pages
+активного query перечитываются согласованно, UI дедуплицирует session UUID, а кеш и прокрутка не
+сбрасываются. Background error не заменяет уже показанный список, AbortSignal отменяет refetch после
+смены страницы/logout.
 
 PS-010.4.3 подключает session channel к отдельным route `/games/:sessionId` и
 `/games/:sessionId/result` через общий `useSessionRealtime`; одновременно существует только consumer
@@ -387,10 +426,11 @@ reconnect и fallback помечают stale prefix `['game-sessions', sessionId
 socket.
 
 Result route отслеживает revision текущего матча как `(match.id, version)`. Обычный background
-refetch той же revision не меняет draft. Для новой revision монтируется чистый редактор без старого
-счёта, а HTTP 409 сохраняет существующий явный recovery flow и блокирует повтор. Поэтому результат
-старого матча нельзя случайно отправить для successor, а backend validation и optimistic version
-остаются последней защитой гонки.
+refetch той же revision не меняет draft. Новая revision повторно монтирует редактор, но загружает
+локальный draft того же `(user UUID, match UUID)`; новый match UUID получает отдельный чистый draft.
+HTTP 409 сохраняет существующий явный recovery flow и блокирует повтор. Поэтому результат старого
+матча нельзя случайно отправить для successor, а backend validation и optimistic version остаются
+последней защитой гонки.
 
 ## 11. Read models, события и отказоустойчивость
 

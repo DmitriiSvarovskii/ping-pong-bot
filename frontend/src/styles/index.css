@@ -30,17 +30,19 @@
   --accent: var(--tg-theme-button-color, #29a869);
   --accent-text: var(--tg-theme-button-text-color, #ffffff);
   --border: color-mix(in srgb, var(--muted) 18%, transparent);
-  --app-safe-top: max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px), var(--tg-content-safe-area-inset-top, 0px), var(--app-telegram-safe-area-inset-top, 0px), var(--app-telegram-content-safe-area-inset-top, 0px));
-  --app-safe-right: max(env(safe-area-inset-right, 0px), var(--tg-safe-area-inset-right, 0px), var(--tg-content-safe-area-inset-right, 0px), var(--app-telegram-safe-area-inset-right, 0px), var(--app-telegram-content-safe-area-inset-right, 0px));
-  --app-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px), var(--tg-content-safe-area-inset-bottom, 0px), var(--app-telegram-safe-area-inset-bottom, 0px), var(--app-telegram-content-safe-area-inset-bottom, 0px));
-  --app-safe-left: max(env(safe-area-inset-left, 0px), var(--tg-safe-area-inset-left, 0px), var(--tg-content-safe-area-inset-left, 0px), var(--app-telegram-safe-area-inset-left, 0px), var(--app-telegram-content-safe-area-inset-left, 0px));
+  --app-safe-top: max(env(safe-area-inset-top, 0px), calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)), var(--app-telegram-safe-content-inset-top, 0px));
+  --app-safe-right: max(env(safe-area-inset-right, 0px), calc(var(--tg-safe-area-inset-right, 0px) + var(--tg-content-safe-area-inset-right, 0px)), var(--app-telegram-safe-content-inset-right, 0px));
+  --app-safe-bottom: max(env(safe-area-inset-bottom, 0px), calc(var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px)), var(--app-telegram-safe-content-inset-bottom, 0px));
+  --app-safe-left: max(env(safe-area-inset-left, 0px), calc(var(--tg-safe-area-inset-left, 0px) + var(--tg-content-safe-area-inset-left, 0px)), var(--app-telegram-safe-content-inset-left, 0px));
 }
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; margin: 0; }
 body { min-width: 320px; min-height: 100vh; min-height: var(--app-telegram-viewport-height, 100dvh); overflow-x: hidden; overflow-y: auto; background: var(--tg-theme-bg-color, var(--app-bg)); -webkit-overflow-scrolling: touch; }
+button, a, label, input, textarea, select { touch-action: manipulation; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button, input, textarea, select { font: inherit; }
+input:not([type="checkbox"]), textarea, select { font-size: 1rem; }
 a { color: inherit; text-decoration: none; }
 
 .app-shell { min-height: var(--app-telegram-viewport-height, 100dvh); padding-bottom: calc(76px + var(--app-safe-bottom)); }
@@ -79,6 +81,11 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .nav-item { display: grid; width: min(28vw, 120px); place-items: center; gap: 2px; color: var(--muted); font-size: .68rem; font-weight: 700; }
 .nav-item svg { width: 25px; height: 25px; }
 .nav-item.active { color: var(--accent); }
+.app-update-banner { position: fixed; z-index: 20; right: max(14px, var(--app-safe-right)); bottom: calc(76px + var(--app-safe-bottom)); left: max(14px, var(--app-safe-left)); display: flex; max-width: 532px; margin: 0 auto; padding: 13px 14px; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 16px 44px #08140d30; }
+.app-update-banner p { margin: 0; font-size: .82rem; line-height: 1.4; }
+.app-update-banner > .primary-button { min-height: 42px; padding: 9px 14px; flex: none; }
+.app-update-actions { display: flex; flex: none; gap: 6px; }
+.app-update-actions .primary-button { min-height: 42px; padding: 9px 14px; }
 
 .auth-screen, .placeholder { min-height: 100vh; min-height: 100dvh; display: flex; max-width: 480px; margin: auto; padding: max(48px, var(--app-safe-top)) max(28px, var(--app-safe-right)) max(40px, var(--app-safe-bottom)) max(28px, var(--app-safe-left)); flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .auth-screen h1, .placeholder h1 { font-size: 2.25rem; }
@@ -125,11 +132,17 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .session-list-item p { margin: 0; color: var(--muted); font-size: .82rem; }
 .session-list-meta { display: grid; flex: none; justify-items: end; gap: 6px; color: var(--muted); font-size: .75rem; }
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: .78rem; }
+.infinite-list-status { display: flex; min-height: 52px; margin: 0; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: .82rem; text-align: center; }
+.infinite-list-status.error-panel { justify-content: space-between; padding: 10px 12px; border-radius: 16px; background: #e8504215; }
+.infinite-list-status .loader { width: 22px; height: 22px; }
+.infinite-list-status .secondary-button { min-height: 42px; padding: 9px 14px; flex: none; }
+.load-more-sentinel { height: 1px; }
 
 .session-hero { position: relative; display: grid; gap: 14px; padding: 22px; overflow: hidden; border-radius: 26px; color: #fff; background: linear-gradient(145deg, #24965d, #164d35); }
 .session-hero h1 { margin-top: 16px; font-size: 2.2rem; }
 .session-hero p { color: #ffffffb5; }
 .session-hero .status-badge { color: #fff; background: #ffffff22; }
+.session-player-count { display: block; margin-top: 9px; font-size: .85rem; }
 .share-button { width: fit-content; min-height: 42px; padding: 0 15px; color: #fff; border: 1px solid #ffffff40; border-radius: 13px; background: #ffffff12; font-weight: 750; }
 .share-message { color: #ffffffb5; }
 .section-card, .current-match-card, .session-actions, .set-editor { padding: 19px; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); }
@@ -140,7 +153,7 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .current-pair, .versus { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 15px; }
 .player-chip, .versus > div { display: grid; min-width: 0; min-height: 92px; padding: 14px; align-content: space-between; border-radius: 17px; background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
 .player-chip span, .versus span { color: var(--accent); font-size: .72rem; font-weight: 850; }
-.player-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-player-name { min-width: 0; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
 .current-match-player-name { min-width: 0; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
 .queue-title { margin-top: 20px; }
 .waiting-list { display: grid; margin: 10px 0 0; padding: 0; gap: 7px; list-style: none; }

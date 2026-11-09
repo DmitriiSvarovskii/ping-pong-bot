@@ -25,6 +25,7 @@ interface TelegramSafeAreaInset {
 }
 
 type TelegramWebAppEvent =
+  | 'activated'
   | 'viewportChanged'
   | 'safeAreaChanged'
   | 'contentSafeAreaChanged'

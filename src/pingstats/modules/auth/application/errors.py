@@ -24,3 +24,21 @@ class TelegramAuthUnavailableError(ApplicationError):
             message="Telegram authentication is not configured",
             status_code=503,
         )
+
+
+class RefreshAuthenticationError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__(
+            code="refresh_authentication_invalid",
+            message="Authentication could not be renewed",
+            status_code=401,
+        )
+
+
+class RefreshCsrfError(ApplicationError):
+    def __init__(self) -> None:
+        super().__init__(
+            code="refresh_csrf_rejected",
+            message="Refresh request was rejected",
+            status_code=403,
+        )

@@ -9,7 +9,11 @@ export function useTelegramBackButton(onBack: () => void, enabled = true) {
 
   useEffect(() => {
     const backButton = window.Telegram?.WebApp.BackButton
-    if (!enabled || !backButton) return
+    if (!backButton) return
+    if (!enabled) {
+      backButton.hide()
+      return
+    }
     const handleBack = () => onBackRef.current()
 
     backButton.onClick(handleBack)
@@ -17,7 +21,10 @@ export function useTelegramBackButton(onBack: () => void, enabled = true) {
 
     return () => {
       backButton.offClick(handleBack)
-      backButton.hide()
     }
   }, [enabled])
+
+  useEffect(() => () => {
+    window.Telegram?.WebApp.BackButton?.hide()
+  }, [])
 }

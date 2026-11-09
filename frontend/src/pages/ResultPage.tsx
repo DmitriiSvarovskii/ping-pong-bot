@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useCallback, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Link, useParams } from 'react-router-dom'
 
 import { getCurrentSessionMatch, recordSessionResult } from '../api/gameSessions'
 import { ApiError, type ApiClient } from '../api/client'
@@ -8,34 +8,43 @@ import { useAuth } from '../auth/AuthProvider'
 import { ErrorPanel, LoadingPanel, sessionErrorMessage } from '../components/SessionUi'
 import { getDisplayName } from '../hooks/useDisplayName'
 import { sessionKeys, useInvalidateSession } from '../hooks/useGameSession'
-import { useTelegramBackButton } from '../hooks/useTelegramBackButton'
 import { useSessionRealtime } from '../realtime/useSessionRealtime'
 import type {
   SessionMatch,
   SessionMatchCommandResponse,
   SetScoreInput,
 } from '../types/gameSessions'
+import {
+  loadResultDraft,
+  removeResultDraft,
+  saveResultDraft,
+  type DraftScore,
+  type ResultDraftSet,
+} from './resultDraft'
 
-type EditableScore = number | ''
-type EditableSetScore = {
-  player1_score: EditableScore
-  player2_score: EditableScore
-}
+type EditableScore = DraftScore
+type EditableSetScore = ResultDraftSet
 
 export function ResultPage() {
   const { sessionId = '' } = useParams()
-  const navigate = useNavigate()
-  const { apiClient } = useAuth()
+  const { apiClient, user } = useAuth()
   const invalidate = useInvalidateSession()
   useSessionRealtime(sessionId)
-  const returnToSession = useCallback(() => {
-    void navigate(`/games/${sessionId}`)
-  }, [navigate, sessionId])
-  useTelegramBackButton(returnToSession)
   const current = useQuery({
     queryKey: sessionKeys.currentMatch(sessionId),
     queryFn: ({ signal }) => getCurrentSessionMatch(apiClient, sessionId, signal),
   })
+  const previousMatchId = useRef<string | null>(null)
+  const currentMatchId = current.data?.id ?? null
+
+  useEffect(() => {
+    const previous = previousMatchId.current
+    if (previous && previous !== currentMatchId && user?.id) {
+      removeResultDraft(user.id, previous)
+      previousMatchId.current = null
+    }
+    if (currentMatchId) previousMatchId.current = currentMatchId
+  }, [currentMatchId, user?.id])
 
   if (current.isPending) return <LoadingPanel label="Загружаем матч…" />
   if (current.error && !current.data) {
@@ -57,6 +66,7 @@ export function ResultPage() {
       apiClient={apiClient}
       match={match}
       sessionId={sessionId}
+      userId={user?.id ?? ''}
       invalidate={invalidate}
       refreshCurrent={async () => { await current.refetch() }}
     />
@@ -69,16 +79,17 @@ function ResultEditor({
   match,
   refreshCurrent,
   sessionId,
+  userId,
 }: {
   apiClient: ApiClient
   invalidate: (sessionId: string) => Promise<void>
   match: SessionMatch
   refreshCurrent: () => Promise<void>
   sessionId: string
+  userId: string
 }) {
-  const [sets, setSets] = useState<EditableSetScore[]>([
-    { player1_score: 0, player2_score: 0 },
-  ])
+  const [sets, setSets] = useState<EditableSetScore[]>(() =>
+    loadResultDraft(userId, match.id) ?? [{ player1_score: 0, player2_score: 0 }])
   const [stale, setStale] = useState(false)
   const [result, setResult] = useState<SessionMatchCommandResponse | null>(null)
   const mutation = useMutation({
@@ -88,6 +99,7 @@ function ResultEditor({
       return recordSessionResult(apiClient, sessionId, match.id, payload, match.version)
     },
     onSuccess: async (response) => {
+      removeResultDraft(userId, match.id)
       setResult(response)
       await invalidate(sessionId)
     },
@@ -101,6 +113,10 @@ function ResultEditor({
   const players = [...match.participants].sort((a, b) => a.position - b.position)
   const canSubmit = getScorePayload(sets) !== null
 
+  useEffect(() => {
+    if (userId) saveResultDraft(userId, match.id, sets)
+  }, [match.id, sets, userId])
+
   function updateSet(index: number, position: 1 | 2, value: EditableScore) {
     setSets((items) => items.map((item, itemIndex) => itemIndex === index
       ? { ...item, [position === 1 ? 'player1_score' : 'player2_score']: value }
@@ -113,6 +129,7 @@ function ResultEditor({
   }
 
   async function refreshStale() {
+    removeResultDraft(userId, match.id)
     setSets([{ player1_score: 0, player2_score: 0 }])
     setResult(null)
     await refreshCurrent()

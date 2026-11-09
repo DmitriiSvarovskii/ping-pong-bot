@@ -98,7 +98,7 @@ function subscribeViewport(webApp: TelegramWebApp, controller: ViewportControlle
     webApp.isVersionAtLeast?.('8.0') ??
     (webApp.safeAreaInset !== undefined || webApp.contentSafeAreaInset !== undefined)
   const events: TelegramWebAppEvent[] = supportsSafeAreaEvents
-    ? ['viewportChanged', 'safeAreaChanged', 'contentSafeAreaChanged']
+    ? ['viewportChanged', 'activated', 'safeAreaChanged', 'contentSafeAreaChanged']
     : ['viewportChanged']
   for (const event of events) {
     try {
@@ -128,9 +128,24 @@ function syncViewportMetrics(webApp: TelegramWebApp) {
   const root = document.documentElement
   syncInset(root, 'safe-area', webApp.safeAreaInset)
   syncInset(root, 'content-safe-area', webApp.contentSafeAreaInset)
+  syncCombinedInset(root, webApp.safeAreaInset, webApp.contentSafeAreaInset)
   const height = validPixels(webApp.viewportHeight)
   if (height === null) root.style.removeProperty('--app-telegram-viewport-height')
   else root.style.setProperty('--app-telegram-viewport-height', `${height}px`)
+}
+
+function syncCombinedInset(
+  root: HTMLElement,
+  safeArea: TelegramSafeAreaInset | undefined,
+  contentSafeArea: TelegramSafeAreaInset | undefined,
+) {
+  for (const side of insetSides) {
+    const property = `--app-telegram-safe-content-inset-${side}`
+    const safeValue = validPixels(safeArea?.[side])
+    const contentValue = validPixels(contentSafeArea?.[side])
+    if (safeValue === null && contentValue === null) root.style.removeProperty(property)
+    else root.style.setProperty(property, `${(safeValue ?? 0) + (contentValue ?? 0)}px`)
+  }
 }
 
 function syncInset(

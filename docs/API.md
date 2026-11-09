@@ -26,7 +26,8 @@ Base path: `/api/v1`. JSON, UTC timestamps ISO 8601, UUID strings. Все endpoi
 
 | Method | Path | Назначение |
 |---|---|---|
-| POST | `/auth/telegram` | Реализовано; публичный auth endpoint; проверяет подписанный Telegram Mini App `initData`, синхронизирует user и возвращает `{access_token, token_type}` |
+| POST | `/auth/telegram` | Реализовано; проверяет подписанный Telegram Mini App `initData`, синхронизирует user, возвращает `{access_token, token_type, expires_in}` и устанавливает refresh-cookie |
+| POST | `/auth/refresh` | Реализовано; по `HttpOnly`, `SameSite=Strict` refresh-cookie выдаёт новый access JWT без повторного `initData` |
 | POST | `/auth/dev-login` | Реализовано; только development, body отсутствует; get-or-create фиксированного `DEV_USER_ID`; `{access_token, token_type, expires_in, user}`. В production route отсутствует (404) |
 | GET | `/users/me` | Реализовано; текущий профиль, включая собственный nullable `telegram_id` |
 | GET | `/users` | Реализовано; каталог, `limit` 1…100 и `offset >= 0` |
@@ -43,11 +44,21 @@ Telegram login request:
 {"init_data":"query_id=...&user=...&auth_date=...&hash=..."}
 ```
 
-Успешный ответ — `200 {"access_token":"...","token_type":"bearer"}`. Endpoint принимает только
+Успешный ответ —
+`200 {"access_token":"...","token_type":"bearer","expires_in":3600}`. Endpoint принимает только
 исходную подписанную строку из `Telegram.WebApp.initData`; отдельные `user_id`, username и profile
 fields не считаются доверенными. Неверная подпись, структура, устаревший или недопустимо будущий
 `auth_date` возвращают безопасный 401. Если `TELEGRAM_BOT_TOKEN` не настроен, возвращается 503 без
 раскрытия конфигурации. Endpoint доступен во всех окружениях независимо от dev-login.
+
+Успешный Telegram/dev login устанавливает host-only cookie `pingstats_refresh_token` с атрибутами
+`HttpOnly`, `SameSite=Strict`, `Path=/api/v1/auth` и `Secure` в production. Cookie содержит
+подписанный JWT типа `refresh`, не доступна JavaScript и живёт
+`JWT_REFRESH_TOKEN_EXPIRE_DAYS` (default 30 дней). `POST /auth/refresh` не принимает request body,
+требует same-origin header `X-PingStats-CSRF: 1`, не использует устаревший `initData` и возвращает
+новый часовой access token. Отсутствующая, просроченная, неверно подписанная cookie или token другого
+типа дают безопасный 401; отсутствие CSRF header даёт 403. Auth responses используют
+`Cache-Control: no-store`.
 
 `GET /users/{user_id}` реализован и не раскрывает `telegram_id`/`updated_at`. Остальные user history
 маршруты в таблице являются планом будущих этапов. JWT обоих auth providers использует единый

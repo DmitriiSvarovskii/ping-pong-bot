@@ -146,13 +146,22 @@ stale и concurrent retry дают 409; схема БД не меняется.
 **Статус:** принято и реализовано в PS-010.1. **Решение:** frontend bootstrap владеет единственным
 ref-counted controller для Telegram viewport. Он один раз выполняет поддерживаемые imperative calls
 `disableVerticalSwipes()` и mobile-only `requestFullscreen()`/`expand()`, подписывается на viewport и
-оба safe-area event и публикует текущие значения через CSS variables. Последний consumer снимает
-все подписки; повторный mount может подписаться снова, не повторяя fullscreen-запрос. Layout берёт
-максимум из browser env, Telegram CSS variables и bridge values вместо их суммирования. **Почему:**
+оба safe-area event и `activated`, публикуя текущие значения через CSS variables. Последний consumer
+снимает все подписки; повторный mount может подписаться снова, не повторяя fullscreen-запрос. Layout
+складывает device safe area и Telegram content safe area внутри каждого источника, затем берёт
+максимум между browser env, Telegram CSS variables и bridge values. Так разные защитные слои не
+теряются, а одинаковые данные разных источников не суммируются повторно. **Почему:**
 системный chrome и viewport меняются независимо от React render и клавиатуры, а Telegram API не
 должен распространяться по страницам. **Следствия:** браузер без bridge остаётся работоспособным,
 нативная iOS-прокрутка сохраняется, глобальный touch `preventDefault()` не используется; Telegram
 по-прежнему может закрыть или свернуть Mini App жестом на собственной верхней панели.
+
+Навигация Telegram также принадлежит общему `AppShell`, а не отдельным страницам. Корневые маршруты
+явно скрывают BackButton; вложенные используют существующую history роутера и логический fallback
+только при прямом входе. `offset` в URL сохраняется как начальная точка старой прямой ссылки, но
+автоматическая подгрузка истории не изменяет URL. Scroll position сохраняется по ключу history entry,
+отдельный navigation stack не создаётся. Это сохраняет экран списка при возврате и не накапливает
+bridge-handlers или повторные записи активной нижней вкладки.
 
 ## ADR-026: Одноразовый WebSocket ticket и single-process realtime manager
 
@@ -208,16 +217,46 @@ heartbeat сам по себе не инвалидирует данные; не�
 
 ## ADR-030: Realtime списка инвалидирует только активную REST-проекцию
 
-**Статус:** принято и реализовано в PS-010.4.2. **Решение:** `/games` включает персональный list
-channel только при готовой авторизации. `sessions.updated`, reconnect и fallback coalesce-ятся:
-list-prefix помечается stale, но refetch выполняется только для текущего paginated TanStack Query
-key; offset и кешированные данные не
-сбрасываются. Fullscreen loader применяется только при первой загрузке, а background error не
-скрывает ранее полученный список. **Почему:** WebSocket сообщает только факт изменения, REST
+**Статус:** принято и расширено в PS-011.7. **Решение:** `/games` включает персональный list channel
+только при готовой авторизации. `sessions.updated`, reconnect и fallback coalesce-ятся: list-prefix
+помечается stale, но refetch выполняется только для текущего infinite TanStack Query key и всех уже
+загруженных страниц; initial offset и кешированные данные не сбрасываются. Fullscreen loader
+применяется только при первой загрузке, а background error не скрывает ранее полученный список.
+**Почему:** WebSocket сообщает только факт изменения, REST
 остаётся source of truth, а несколько близких lifecycle/event сигналов не должны создавать storm
 запросов. **Следствия:** heartbeat, неизвестный и повреждённый payload не вызывают refetch;
 logout/unmount отменяет consumer через AbortSignal. Другие страницы и session channel этим решением
 не затронуты.
+
+## ADR-034: Offset-compatible infinite history
+
+**Статус:** принято и реализовано в PS-011.7. **Решение:** список `/games` использует
+`useInfiniteQuery` с серверным `limit=20`; legacy `?offset=N` является `initialPageParam`, а
+`IntersectionObserver` с опережающей зоной загружает следующие offset-pages без записи в browser
+history. Страницы объединяются в исходном порядке и дедуплицируются по session UUID. Один in-flight
+guard исключает повторный `fetchNextPage`; observer отключается при unmount или после достижения
+`total`. **Почему:** backend уже возвращает стабильную offset-пагинацию и total, поэтому новый API и
+cursor не нужны. URL не должен меняться от прокрутки, иначе Telegram BackButton и history entries
+становятся непредсказуемыми. **Следствия:** возврат использует сохранённые pages TanStack Query и
+существующую scroll position по location key. Offset pagination допускает сдвиг границ при новых
+записях, поэтому realtime refetch перечитывает все загруженные страницы, а UI дополнительно удаляет
+дубликаты. Infinite-list query живёт до завершения frontend runtime (`gcTime: Infinity`), чтобы
+длительный открытый detail route не удалил состояние исходного списка; query key включает user UUID,
+поэтому cache разных пользователей изолирован. Память ограничена страницами, которые пользователь
+действительно подгрузил.
+
+## ADR-035: Build manifest и явное безопасное обновление frontend
+
+**Статус:** принято и реализовано в PS-011.8. **Решение:** Vite генерирует уникальный build ID на
+каждый build, встраивает его в JS и выпускает same-origin `/version.json`. Frontend проверяет manifest
+с cache bypass при старте, каждые 15 минут и при `visibilitychange` в visible. Отличающийся ID только
+показывает banner; reload выполняется пользователем. Содержательный draft `(user UUID, match UUID)`
+требует дополнительного inline-подтверждения и не удаляется. **Почему:** автоматический reload может
+прервать матч, а повторная Telegram initData-аутентификация через длительное время невозможна;
+существующие HttpOnly refresh credential и local draft уже обеспечивают безопасное восстановление.
+**Следствия:** `index.html` и `version.json` должны отдаваться с `no-store/no-cache`, hashed assets —
+с immutable year cache. Ошибка manifest/check не блокирует приложение. Проверка является polling
+только версии, не данных, и использует один 15-минутный timer на смонтированный AppShell.
 
 ## ADR-031: Session realtime заменяет постоянный polling
 
@@ -228,9 +267,10 @@ session-scoped consumer, но каждый route монтирует только
 удалён. **Почему:** backend event уже сигнализирует каждое committed изменение, а transport имеет
 контролируемый 15-секундный fallback на время недоступности socket. Параллельный polling создавал бы
 лишние запросы и гонки UI. **Следствия:** REST остаётся source of truth; cached state сохраняется при
-background error. Result draft привязан к `(match.id, version)`: та же revision сохраняет ввод,
-новая монтирует чистый редактор без старого ввода; HTTP 409 блокирует submit и остаётся обязательным recovery для гонки между
-последним refetch и записью.
+background error. React editor remount привязан к `(match.id, version)`, а persisted draft — к
+`(user UUID, match UUID)`: новая revision того же матча восстанавливает его, successor использует
+другой ключ. HTTP 409 блокирует submit и остаётся обязательным recovery для гонки между последним
+refetch и записью.
 
 ## ADR-032: Явная WebSocket runtime-зависимость Uvicorn
 
@@ -241,3 +281,21 @@ protocol implementation. Не использовать `uvicorn[standard]`, по
 базовый пакет Uvicorn не устанавливает `websockets` или `wsproto`, поэтому HTTP сервер запускается,
 но WebSocket Upgrade недоступен. **Следствия:** production обязан выполнить
 `uv sync --frozen --no-dev` до restart; версия фактически фиксируется `uv.lock`.
+
+## ADR-033: HttpOnly refresh credential и локальный draft результата
+
+**Статус:** принято и реализовано в PS-011.4. **Решение:** часовой access JWT остаётся в памяти и
+автоматически восстанавливается через `POST /auth/refresh`. Долгоживущий JWT типа `refresh`
+устанавливается только после Telegram/dev login как host-only `HttpOnly`, `SameSite=Strict`,
+production-`Secure` cookie с ограниченным configurable lifetime. Refresh дополнительно требует
+same-origin custom header. Frontend coalesce-ит параллельные 401 в один refresh и повторяет каждый
+отклонённый auth dependency запрос ровно один раз. Draft результата хранится локально по
+`(user UUID, match UUID)` и удаляется после успешной записи либо подтверждённой смены current match.
+**Почему:** Telegram `initData` действительно только пять минут, поэтому через час оно уже не может
+быть безопасной renewal credential; увеличение access TTL расширяло бы ущерб от утечки. 401
+возникает в auth dependency до бизнес-команды, поэтому однократный retry не дублирует mutation.
+**Следствия:** миграция и server draft store не нужны; refresh-cookie недоступна JavaScript и не
+логируется. Logout endpoint сейчас отсутствует. Stateless refresh нельзя выборочно отозвать до expiry
+без смены JWT secret; нельзя утверждать, что удаление cookie отзовёт уже скопированный token. Если
+появятся logout нескольких устройств или security-session management, потребуется server-side
+hashed refresh-session store и rotation/revocation.

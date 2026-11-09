@@ -636,6 +636,92 @@ async def test_complete_cancel_read_permissions_and_forbidden_transitions(setup)
     assert total == 1 and listed[0].session.id == created.session.id
 
 
+async def test_complete_preserves_results_and_excludes_unfinished_current_match(setup) -> None:
+    service, repository, checker, organizer, player, _ = setup
+    created = await service.create_session(uow(repository, checker), actor_id=organizer)
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=created.session.id
+    )
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    first_match = await repository.matches.get_current_for_session(created.session.id)
+    assert first_match is not None
+
+    recorded = await service.record_session_result(
+        uow(repository, checker),
+        actor_id=player,
+        session_id=created.session.id,
+        match_id=first_match.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    assert recorded.current_match is not None
+    unfinished_match_id = recorded.current_match.match.id
+
+    completed = await service.complete_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    assert completed.session.status is GameSessionStatus.COMPLETED
+
+    matches, total = await service.list_session_matches(
+        repository,
+        repository.matches,
+        actor_id=organizer,
+        session_id=created.session.id,
+        limit=20,
+        offset=0,
+    )
+    assert total == 2
+    assert [view.match.status for view in matches] == [
+        MatchStatus.COMPLETED,
+        MatchStatus.CANCELLED,
+    ]
+    assert matches[0].match.id == first_match.match.id
+    assert matches[0].match.winner_id == organizer
+    assert [item.score() for item in matches[0].sets] == [SetScore(11, 4)]
+    assert matches[1].match.id == unfinished_match_id
+    assert matches[1].match.winner_id is None
+    assert matches[1].match.completed_at is None
+    assert matches[1].match.cancelled_at is not None
+    assert matches[1].sets == ()
+
+    statistics = await service.get_session_statistics(
+        repository,
+        repository.matches,
+        actor_id=organizer,
+        session_id=created.session.id,
+    )
+    by_user = {item.user.id: item for item in statistics}
+    assert (
+        by_user[organizer].wins,
+        by_user[organizer].losses,
+        by_user[organizer].points_for,
+        by_user[organizer].points_against,
+    ) == (1, 0, 11, 4)
+    assert (
+        by_user[player].wins,
+        by_user[player].losses,
+        by_user[player].points_for,
+        by_user[player].points_against,
+    ) == (0, 1, 4, 11)
+
+    event_count = len(repository.events)
+    with pytest.raises(GameSessionStateError):
+        await service.complete_session(
+            uow(repository, checker), actor_id=organizer, session_id=created.session.id
+        )
+    assert len(repository.events) == event_count
+    assert (
+        await service.get_session_statistics(
+            repository,
+            repository.matches,
+            actor_id=organizer,
+            session_id=created.session.id,
+        )
+        == statistics
+    )
+
+
 async def test_active_join_is_enqueued_and_waiting_leave_reindexes(setup) -> None:
     service, repository, checker, organizer, player, outsider = setup
     created = await service.create_session(uow(repository, checker), actor_id=organizer)

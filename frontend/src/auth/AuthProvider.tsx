@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 
-import { getCurrentUser, telegramLogin } from '../api/auth'
+import { getCurrentUser, refreshAccessToken, telegramLogin } from '../api/auth'
 import { ApiClient, ApiError } from '../api/client'
 import type { CurrentUser } from '../types/api'
 import { initializeTelegram } from './telegram'
@@ -47,6 +47,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => client.setUnauthorizedHandler(null)
   }, [clearSession, client])
 
+  const recoverAuthentication = useCallback(async (): Promise<string | null> => {
+    try {
+      const response = await refreshAccessToken(client)
+      client.setAccessToken(response.access_token)
+      setAccessToken(response.access_token)
+      setLoginError(null)
+      return response.access_token
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) return null
+      throw error
+    }
+  }, [client])
+
+  useEffect(() => {
+    client.setAuthenticationRecoveryHandler(recoverAuthentication)
+    return () => client.setAuthenticationRecoveryHandler(null)
+  }, [client, recoverAuthentication])
+
   const authenticateTelegram = useCallback(
     async (initData: string, signal?: AbortSignal) => {
       setLoginError(null)
@@ -71,6 +89,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (controller.signal.aborted) return
       const telegram = initializeTelegram()
       cleanupTelegram = () => telegram.cleanup()
+      try {
+        const refreshed = await refreshAccessToken(client)
+        if (controller.signal.aborted) return
+        client.setAccessToken(refreshed.access_token)
+        setAccessToken(refreshed.access_token)
+        return
+      } catch {
+        // A missing/expired cookie falls through to the configured primary auth provider.
+      }
       if (telegram.initData) {
         await authenticateTelegram(telegram.initData, controller.signal)
       } else if (import.meta.env.DEV) {
@@ -84,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       controller.abort()
       cleanupTelegram()
     }
-  }, [attempt, authenticateTelegram])
+  }, [attempt, authenticateTelegram, client])
 
   const profile = useQuery({
     queryKey: ['current-user'],
