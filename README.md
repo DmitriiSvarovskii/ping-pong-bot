@@ -15,6 +15,19 @@ uv sync
 uv run uvicorn pingstats.main:app --reload
 ```
 
+`websockets>=13.0` является явной runtime-зависимостью: без неё минимальная установка Uvicorn не
+содержит WebSocket protocol implementation. Автоматический deployment-check находится в
+`tests/unit/test_websocket_runtime.py` и проверяет, что `ws="auto"` выбирает реальный протокол.
+
+Production-зависимости синхронизируются строго по committed lock без dev-группы:
+
+```shell
+uv sync --frozen --no-dev
+```
+
+Команду выполняют после получения обновлённых `pyproject.toml` и `uv.lock`, до перезапуска одного
+Uvicorn worker.
+
 После запуска доступны:
 
 - Swagger UI: <http://127.0.0.1:8000/docs>
@@ -54,8 +67,8 @@ npm run test
 `startapp`-приглашению, live-очередь, участники, история, lifecycle actions и запись полного
 результата. Frontend использует только существующий `/api/v1/game-sessions` contract. Победитель,
 ротация и следующий матч всегда определяются backend; stale result с HTTP 409 требует явного
-обновления формы. Active-сессия опрашивается каждые четыре секунды, а успешные команды сразу
-инвалидируют связанные запросы.
+обновления формы. Active-сессия обновляется через session WebSocket, а при недоступном соединении —
+контролируемым REST fallback; успешные команды сразу инвалидируют связанные запросы.
 
 ## Локальная PostgreSQL
 

@@ -231,3 +231,13 @@ session-scoped consumer, но каждый route монтирует только
 background error. Result draft привязан к `(match.id, version)`: та же revision сохраняет ввод,
 новая монтирует чистый редактор без старого ввода; HTTP 409 блокирует submit и остаётся обязательным recovery для гонки между
 последним refetch и записью.
+
+## ADR-032: Явная WebSocket runtime-зависимость Uvicorn
+
+**Статус:** принято после deployment-аудита PS-010. **Решение:** добавить `websockets>=13.0` как
+прямую runtime-зависимость и проверять через unit-тест, что Uvicorn `ws=auto` выбирает доступную
+protocol implementation. Не использовать `uvicorn[standard]`, поскольку его дополнительные
+`uvloop`, `httptools`, `watchfiles` и прочие пакеты не требуются для устранения blocker. **Почему:**
+базовый пакет Uvicorn не устанавливает `websockets` или `wsproto`, поэтому HTTP сервер запускается,
+но WebSocket Upgrade недоступен. **Следствия:** production обязан выполнить
+`uv sync --frozen --no-dev` до restart; версия фактически фиксируется `uv.lock`.

@@ -267,6 +267,12 @@ HTTP/1.1, WebSocket `Upgrade`/`Connection` forwarding и read timeout больш
 Конфигурация Nginx/service manager находится вне репозитория и должна проверяться отдельно перед
 deployment; кодовая конфигурация не может подтвердить соблюдение этого ограничения.
 
+Uvicorn устанавливается без extra `standard`, поэтому WebSocket protocol не является его базовой
+транзитивной зависимостью. Проект явно фиксирует runtime `websockets>=13.0`, соответствующий metadata
+Uvicorn 0.54. Production использует `ws=auto`, который при текущей комбинации выбирает
+`websockets-sansio`; unit deployment-guard загружает Uvicorn Config и требует ненулевой protocol
+class. Production sync выполняется `uv sync --frozen --no-dev` строго по `uv.lock`.
+
 PS-010.3.3 расширяет тот же ticket store отдельным scope `sessions_list` и тот же manager — отдельной
 user-keyed картой соединений. `/game-sessions/ws` никогда не попадает в session-keyed map, поэтому
 `session.updated` и `sessions.updated` не смешиваются. Application-порт `SessionsUpdatePublisher`
