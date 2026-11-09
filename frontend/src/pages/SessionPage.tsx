@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { cancelCurrentMatch, skipCurrentMatch, transitionSession } from '../api/gameSessions'
@@ -18,6 +18,8 @@ import {
 } from '../components/SessionUi'
 import { getDisplayName } from '../hooks/useDisplayName'
 import { useGameSession, useInvalidateSession } from '../hooks/useGameSession'
+import { useTelegramBackButton } from '../hooks/useTelegramBackButton'
+import { useSessionRealtime } from '../realtime/useSessionRealtime'
 
 type SessionAction = 'leave' | 'start' | 'complete' | 'cancel' | 'cancel-and-leave'
 
@@ -26,7 +28,10 @@ export function SessionPage() {
   const navigate = useNavigate()
   const { user, apiClient } = useAuth()
   const data = useGameSession(sessionId)
+  useSessionRealtime(sessionId)
   const invalidate = useInvalidateSession()
+  const returnToGames = useCallback(() => { void navigate('/games') }, [navigate])
+  useTelegramBackButton(returnToGames)
   const [shareMessage, setShareMessage] = useState<string | null>(null)
   const [skipOpen, setSkipOpen] = useState(false)
   const mutation = useMutation({
@@ -58,7 +63,7 @@ export function SessionPage() {
   })
 
   if (data.detail.isPending) return <LoadingPanel />
-  if (data.detail.error || !data.detail.data) return <ErrorPanel error={data.detail.error} onRetry={() => void data.detail.refetch()} />
+  if (!data.detail.data) return <ErrorPanel error={data.detail.error} onRetry={() => void data.detail.refetch()} />
 
   const session = data.detail.data
   const participants = data.participants.data?.items ?? session.active_participants
@@ -84,13 +89,13 @@ export function SessionPage() {
 
   {mutation.error && <div className="inline-error">{sessionErrorMessage(mutation.error)}</div>}
 
-  {session.status === 'active' && current ? <section className="current-match-card"><div className="section-title"><span>Текущий матч</span><strong>#{current.sequence_number}</strong></div><div className="versus">{[...current.participants].sort((a, b) => a.position - b.position).map((item, index) => <div key={item.user.id}><span>{index === 0 ? 'A' : 'B'}</span><strong>{getDisplayName(item.user)}</strong></div>)}</div><div className="current-match-actions">{(isOrganizer || isCurrentPlayer) && <button className="secondary-button" disabled={actionPending || skipMutation.isPending} onClick={() => { skipMutation.reset(); setSkipOpen(true) }}>Пропустить</button>}{isParticipant && <Link className="primary-button" to={`/games/${session.id}/result`}>Записать результат</Link>}</div></section> : session.status === 'active' ? <LoadingPanel label={queue?.is_paused ? 'Сессия на паузе' : 'Загружаем текущий матч…'} /> : null}
+  {session.status === 'active' && current ? <section className="current-match-card"><div className="section-title"><span>Текущий матч</span><strong>#{current.sequence_number}</strong></div><div className="versus">{[...current.participants].sort((a, b) => a.position - b.position).map((item, index) => <div key={item.user.id}><span>{index === 0 ? 'A' : 'B'}</span><strong className="current-match-player-name">{getDisplayName(item.user)}</strong></div>)}</div><div className="current-match-actions">{(isOrganizer || isCurrentPlayer) && <button className="secondary-button" disabled={actionPending || skipMutation.isPending} onClick={() => { skipMutation.reset(); setSkipOpen(true) }}>Пропустить</button>}{isParticipant && <Link className="primary-button" to={`/games/${session.id}/result`}>Записать результат</Link>}</div></section> : session.status === 'active' ? <LoadingPanel label={queue?.is_paused ? 'Сессия на паузе' : 'Загружаем текущий матч…'} /> : null}
 
   {queue && <SessionQueuePanel queue={queue} participants={participants} />}
 
   <section className="section-card"><div className="section-title"><h2>Участники</h2><span>{participants.length}</span></div><div className="participants-list">{participants.map((item) => <div key={item.participation_id}><span className="participant-avatar">{item.user.first_name.slice(0, 1).toUpperCase()}</span><strong>{getDisplayName(item.user)}</strong><small>{item.user.id === session.organizer_id ? 'Организатор' : item.user.id === user?.id ? 'Вы' : ''}</small></div>)}</div>{organizer && <p className="muted-copy">Организатор: {getDisplayName(organizer)}</p>}</section>
 
-  {data.statistics.error
+  {data.statistics.error && !data.statistics.data
     ? <ErrorPanel error={data.statistics.error} onRetry={() => void data.statistics.refetch()} />
     : <SessionLeaderboard items={data.statistics.data?.items ?? []} />}
   <SessionHistory matches={data.matches.data?.items ?? []} />

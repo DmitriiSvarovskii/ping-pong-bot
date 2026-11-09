@@ -1,4 +1,4 @@
-# Предварительный REST API
+# Предварительный HTTP и WebSocket API
 
 Base path: `/api/v1`. JSON, UTC timestamps ISO 8601, UUID strings. Все endpoints с данными игроков, матчей и турниров требуют Bearer JWT и единый `get_current_user`; публичного anonymous read API в MVP нет. Реализованные users-списки используют `?offset=&limit=` (default 20, max 100); cursor pagination может быть введена позднее без изменения write API.
 
@@ -137,6 +137,10 @@ fields не считаются доверенными. Неверная подп
 | POST | `/game-sessions/{session_id}/matches/current/cancel` | Реализовано; organizer/current player отменяет и получает successor |
 | POST | `/game-sessions/{session_id}/matches/current/cancel-and-leave` | Реализовано; current player атомарно отменяет матч и выходит |
 | POST | `/game-sessions/{session_id}/matches/current/skip` | Реализовано; отменить current match и переместить первого, второго либо обоих игроков в хвост |
+| POST | `/game-sessions/ws-ticket` | Реализовано; Bearer JWT, одноразовый ticket для персонального списка, ответ 201 |
+| WS | `/game-sessions/ws` | Реализовано; персональный канал invalidation списка «Мои игры» |
+| POST | `/game-sessions/{session_id}/ws-ticket` | Реализовано; Bearer JWT, одноразовый session-scoped ticket с коротким TTL, ответ 201 |
+| WS | `/game-sessions/{session_id}/ws` | Реализовано; authenticated invalidation channel без полных session payloads |
 
 Create body: `SessionCreateRequest` с nullable `name`, положительными `points_to_win` и
 `sets_to_win`, `is_ranked`. `SessionResponse` не раскрывает audit payload и содержит только
@@ -173,10 +177,66 @@ PS-007.5b подтверждает контракт реальными JWT/FastA
 OpenAPI содержит все session paths, Bearer security, обязательный `match_id` и документированные
 400/401/403/404/409/422 responses. Swagger UI доступен локально по `/docs`.
 
+WebSocket не принимает access JWT в query string. Сначала клиент с обычным Bearer JWT вызывает
+`POST /game-sessions/{session_id}/ws-ticket` и получает
+`{"ticket":"opaque-value","expires_in":30}` с `Cache-Control: no-store`. Endpoint проверяет
+существование сессии и участие пользователя. Затем browser открывает WebSocket, передавая два
+subprotocol values: `pingstats.v1` и `pingstats.ticket.<opaque-value>`. Ticket находится в
+`Sec-WebSocket-Protocol`, не в URL; сервер выбирает и возвращает только `pingstats.v1`.
+
+Ticket привязан к user/session, хранится на сервере только как SHA-256 digest, истекает через
+`WEBSOCKET_TICKET_TTL_SECONDS` и атомарно удаляется при первой попытке использования. Перед accept
+сервер повторно проверяет доступ короткой SQLAlchemy session, которая закрывается до регистрации
+socket. Close codes до accept: `4401` — отсутствующий/невалидный/истёкший/replayed ticket, `4403` —
+нет доступа, `4404` — сессия исчезла. Сервер посылает heartbeat:
+
+```json
+{"type":"heartbeat","session_id":"uuid","timestamp":"2026-11-08T20:00:00Z"}
+```
+
+После успешного commit любой изменяющей команды игровой сессии сервер публикует один invalidation
+event подписчикам этой сессии:
+
+```json
+{"type":"session.updated","session_id":"uuid","timestamp":"2026-11-08T20:00:00Z"}
+```
+
+После `session.updated` клиент обязан перечитать существующий REST API; полные session/queue/match
+данные через socket не передаются. Событие публикуется для create/join/leave/start/complete/cancel,
+записи сета или полного результата, отмены матча, cancel-and-leave и skip one/both. Ошибка,
+rollback, конкурентный конфликт и идемпотентный повтор уже обработанного результата события не
+создают. Доставка best-effort: пропущенное socket-событие восстанавливается последующим REST-чтением.
+
+Для списка «Мои игры» клиент с Bearer JWT вызывает `POST /game-sessions/ws-ticket`, а затем открывает
+`WS /game-sessions/ws` с теми же subprotocol values. Ticket имеет отдельный scope и не принимается
+session-specific endpoint. Канал привязан к `user_id`; несколько соединений одного пользователя
+разрешены. После committed create/join/leave/start/complete/cancel и cancel-and-leave сервер
+отправляет разрешённым пользователям:
+
+```json
+{"type":"sessions.updated","timestamp":"2026-11-09T00:00:00Z"}
+```
+
+Текущий REST-список содержит только сессии, где пользователь когда-либо участвовал. Поэтому
+аудитория события — исторические участники изменённой сессии, включая вышедших; глобальной рассылки
+нет. Event не содержит session ID, состав или иные данные. Запись результата, cancel/skip текущего
+матча не меняют отображаемые list fields и list event не создают. Rollback/conflict/idempotent no-op
+также ничего не отправляют.
+
+Frontend transport использует оба ticket endpoint через общий `ApiClient`, но не сохраняет ticket
+и не добавляет credentials в URL. Каждое переподключение начинает новый HTTP
+ticket exchange. Negotiated subprotocol обязан быть `pingstats.v1`; heartbeat не вызывает REST
+refetch. При разрыве transport временно включает REST fallback и после нового open требует полную
+синхронизацию. С PS-010.4.2 list channel подключён к `/games`: `sessions.updated`, reconnect и
+fallback инвалидируют list cache и повторяют существующий REST-запрос текущей страницы без
+reload. С PS-010.4.3 session-scoped channel подключён к detail и result routes: событие, reconnect и
+fallback перечитывают активные REST-проекции session prefix без полного reload и без постоянного
+polling.
+
 Frontend PS-008.2b использует этот контракт без дополнительных endpoint: список и detail,
 participants/queue/history/current match, lifecycle commands и full-result. Он передаёт
-`expected_version`, после mutation инвалидирует session queries и опрашивает active-сессию каждые
-четыре секунды. HTTP 409 считается stale state: повторная отправка блокируется до явного получения
+`expected_version`, после mutation инвалидирует session queries и получает внешние изменения через
+session WebSocket с REST fallback. HTTP 409 считается stale state: повторная отправка блокируется до явного получения
 актуального current match. Telegram `startapp=session_<UUID>` ведёт сначала на join, потому что
 приглашённый пользователь ещё не имеет права читать закрытые детали сессии.
 

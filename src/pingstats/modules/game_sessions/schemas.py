@@ -26,6 +26,11 @@ class SessionCreateRequest(BaseModel):
     is_ranked: bool = True
 
 
+class WebSocketTicketResponse(BaseModel):
+    ticket: str
+    expires_in: int
+
+
 class SessionParticipantResponse(BaseModel):
     participation_id: UUID
     user: UserPublicResponse

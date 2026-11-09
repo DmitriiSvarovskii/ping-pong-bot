@@ -28,6 +28,14 @@ from pingstats.modules.game_sessions.application.ports import (
     GameSessionRepository,
     GameSessionsUnitOfWork,
 )
+from pingstats.modules.game_sessions.application.realtime import (
+    NullSessionsUpdatePublisher,
+    NullSessionUpdatePublisher,
+    SessionsUpdatedEvent,
+    SessionsUpdatePublisher,
+    SessionUpdatedEvent,
+    SessionUpdatePublisher,
+)
 from pingstats.modules.game_sessions.application.statistics import calculate_session_statistics
 from pingstats.modules.game_sessions.domain import (
     GameSession,
@@ -70,10 +78,14 @@ class GameSessionService:
         clock: Callable[[], datetime] = _utc_now,
         rotation_strategy: LoserRotatesStrategy | None = None,
         result_writer: MatchResultWriter | None = None,
+        session_update_publisher: SessionUpdatePublisher | None = None,
+        sessions_update_publisher: SessionsUpdatePublisher | None = None,
     ) -> None:
         self._clock = clock
         self._rotation_strategy = rotation_strategy or LoserRotatesStrategy()
         self._result_writer = result_writer or MatchResultWriter(clock=clock)
+        self._session_update_publisher = session_update_publisher or NullSessionUpdatePublisher()
+        self._sessions_update_publisher = sessions_update_publisher or NullSessionsUpdatePublisher()
 
     async def create_session(
         self,
@@ -114,6 +126,8 @@ class GameSessionService:
                 payload={"actor_id": str(actor_id), "role": "organizer"},
             )
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -212,6 +226,8 @@ class GameSessionService:
                 await self._create_next_match(uow, session, updated_queue)
             await uow.game_sessions.update_session(session)
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -267,6 +283,8 @@ class GameSessionService:
                 )
             await uow.game_sessions.update_session(session)
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -313,6 +331,8 @@ class GameSessionService:
             )
             await self._create_next_match(uow, session, queue_state)
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -357,6 +377,8 @@ class GameSessionService:
                 payload={"actor_id": str(actor_id)},
             )
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -383,6 +405,8 @@ class GameSessionService:
                 payload={"actor_id": str(actor_id)},
             )
             view = await self._required_view(uow.game_sessions, session.id)
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return view
 
@@ -513,6 +537,7 @@ class GameSessionService:
                     updated,
                     await self._required_queue_view(uow.game_sessions, session.id),
                 )
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return result
 
@@ -546,6 +571,7 @@ class GameSessionService:
                 raise MatchVersionConflictError
             updated = await self._result_writer.record_full_result(uow.matches, current, scores)
             result = await self._advance_after_result(uow, session, updated)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return result
 
@@ -590,6 +616,7 @@ class GameSessionService:
                 successor,
                 await self._required_queue_view(uow.game_sessions, session.id),
             )
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return result
 
@@ -658,6 +685,8 @@ class GameSessionService:
                 successor,
                 queue_view,
             )
+            await self._publish_sessions_updated_after_commit(uow, session.id)
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return result
 
@@ -731,8 +760,37 @@ class GameSessionService:
                 successor,
                 await self._required_queue_view(uow.game_sessions, session.id),
             )
+            self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
         return result
+
+    def _publish_session_updated_after_commit(
+        self, uow: GameSessionsUnitOfWork, session_id: UUID
+    ) -> None:
+        async def publish() -> None:
+            await self._session_update_publisher.publish(
+                SessionUpdatedEvent(session_id=session_id, timestamp=self._clock())
+            )
+
+        uow.add_after_commit(("session.updated", session_id), publish)
+
+    async def _publish_sessions_updated_after_commit(
+        self, uow: GameSessionsUnitOfWork, session_id: UUID
+    ) -> None:
+        users = await uow.game_sessions.list_historical_users(session_id)
+        recipient_user_ids = frozenset(user.id for user in users)
+        if not recipient_user_ids:
+            return
+
+        async def publish() -> None:
+            await self._sessions_update_publisher.publish(
+                SessionsUpdatedEvent(
+                    recipient_user_ids=recipient_user_ids,
+                    timestamp=self._clock(),
+                )
+            )
+
+        uow.add_after_commit("sessions.updated", publish)
 
     async def _advance_after_result(
         self,

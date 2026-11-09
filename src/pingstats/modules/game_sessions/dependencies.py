@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pingstats.infrastructure.database.engine import Database
@@ -27,8 +27,11 @@ def get_game_session_match_repository(
     return SqlAlchemyMatchRepository(session)
 
 
-def get_game_session_service() -> GameSessionService:
-    return GameSessionService()
+def get_game_session_service(request: Request) -> GameSessionService:
+    return GameSessionService(
+        session_update_publisher=request.app.state.session_update_publisher,
+        sessions_update_publisher=request.app.state.sessions_update_publisher,
+    )
 
 
 def get_game_sessions_uow(

@@ -1,6 +1,6 @@
 """Persistence ports for game session application services."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol
@@ -132,3 +132,5 @@ class GameSessionsUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
     async def rollback(self) -> None: ...
+
+    def add_after_commit(self, key: Hashable, callback: Callable[[], Awaitable[None]]) -> None: ...

@@ -1,6 +1,6 @@
 """Game session lifecycle and membership application tests."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import TracebackType
@@ -19,6 +19,10 @@ from pingstats.modules.game_sessions.application.errors import (
     GameSessionStateError,
     GameSessionUserNotFoundError,
     InvalidGameSessionSettingsError,
+)
+from pingstats.modules.game_sessions.application.realtime import (
+    SessionsUpdatedEvent,
+    SessionUpdatedEvent,
 )
 from pingstats.modules.game_sessions.application.service import GameSessionService
 from pingstats.modules.game_sessions.domain import (
@@ -409,6 +413,7 @@ class FakeUow:
         self.game_sessions = repository
         self.current_matches = checker
         self.matches = repository.matches
+        self.after_commit: dict[Hashable, Callable[[], Awaitable[None]]] = {}
 
     async def __aenter__(self) -> "FakeUow":
         return self
@@ -422,10 +427,32 @@ class FakeUow:
         del exc_type, exc_value, traceback
 
     async def commit(self) -> None:
-        pass
+        callbacks = tuple(self.after_commit.values())
+        self.after_commit.clear()
+        for callback in callbacks:
+            await callback()
 
     async def rollback(self) -> None:
-        pass
+        self.after_commit.clear()
+
+    def add_after_commit(self, key: Hashable, callback: Callable[[], Awaitable[None]]) -> None:
+        self.after_commit.setdefault(key, callback)
+
+
+class RecordingSessionUpdatePublisher:
+    def __init__(self) -> None:
+        self.events: list[SessionUpdatedEvent] = []
+
+    async def publish(self, event: SessionUpdatedEvent) -> None:
+        self.events.append(event)
+
+
+class RecordingSessionsUpdatePublisher:
+    def __init__(self) -> None:
+        self.events: list[SessionsUpdatedEvent] = []
+
+    async def publish(self, event: SessionsUpdatedEvent) -> None:
+        self.events.append(event)
 
 
 @pytest.fixture
@@ -691,6 +718,194 @@ async def test_rotation_is_idempotent_and_cancel_preserves_queue(setup) -> None:
     assert restored.queue == rotated.queue
     assert restored.current_match is not None
     assert restored.current_match.match.sequence_number == 3
+
+
+async def test_mutations_publish_once_but_validation_and_result_replay_do_not(setup) -> None:
+    _, repository, checker, organizer, player, outsider = setup
+    publisher = RecordingSessionUpdatePublisher()
+    service = GameSessionService(session_update_publisher=publisher)
+
+    created = await service.create_session(uow(repository, checker), actor_id=organizer)
+    assert [event.session_id for event in publisher.events] == [created.session.id]
+
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=created.session.id
+    )
+    await service.join_session(
+        uow(repository, checker), actor_id=outsider, session_id=created.session.id
+    )
+    before_invalid = len(publisher.events)
+    with pytest.raises(ActiveSessionParticipantExistsError):
+        await service.join_session(
+            uow(repository, checker), actor_id=player, session_id=created.session.id
+        )
+    assert len(publisher.events) == before_invalid
+
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    current = await repository.matches.get_current_for_session(created.session.id)
+    assert current is not None
+    result = await service.record_session_result(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=current.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    after_result = len(publisher.events)
+    await service.record_session_result(
+        uow(repository, checker),
+        actor_id=player,
+        session_id=created.session.id,
+        match_id=current.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    assert len(publisher.events) == after_result
+
+    assert result.current_match is not None
+    cancelled = await service.cancel_current_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=result.current_match.match.id,
+    )
+    assert cancelled.current_match is not None
+    skipped_one = await service.skip_current_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=cancelled.current_match.match.id,
+        skipped_player_id=organizer,
+        skip_both=False,
+    )
+    assert skipped_one.current_match is not None
+    await service.skip_current_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=skipped_one.current_match.match.id,
+        skipped_player_id=None,
+        skip_both=True,
+    )
+    await service.complete_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+
+    assert len(publisher.events) == 9
+    assert {event.session_id for event in publisher.events} == {created.session.id}
+
+
+async def test_leave_cancel_incremental_set_and_cancel_leave_publish(setup) -> None:
+    _, repository, checker, organizer, player, _ = setup
+    publisher = RecordingSessionUpdatePublisher()
+    service = GameSessionService(session_update_publisher=publisher)
+
+    pending = await service.create_session(uow(repository, checker), actor_id=organizer)
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=pending.session.id
+    )
+    await service.leave_session(
+        uow(repository, checker), actor_id=player, session_id=pending.session.id
+    )
+    await service.cancel_session(
+        uow(repository, checker), actor_id=organizer, session_id=pending.session.id
+    )
+
+    active = await service.create_session(
+        uow(repository, checker), actor_id=organizer, sets_to_win=2
+    )
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=active.session.id
+    )
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=active.session.id
+    )
+    current = await repository.matches.get_current_for_session(active.session.id)
+    assert current is not None
+    partial = await service.record_session_set(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=active.session.id,
+        match_id=current.match.id,
+        score=SetScore(11, 4),
+        expected_version=current.match.version,
+    )
+    await service.cancel_current_match_and_leave(
+        uow(repository, checker),
+        actor_id=player,
+        session_id=active.session.id,
+        match_id=partial.match.match.id,
+    )
+
+    assert len(publisher.events) == 9
+    assert [event.session_id for event in publisher.events[:4]] == [pending.session.id] * 4
+    assert [event.session_id for event in publisher.events[4:]] == [active.session.id] * 5
+
+
+async def test_list_events_follow_existing_participant_visibility(setup) -> None:
+    _, repository, checker, organizer, player, outsider = setup
+    publisher = RecordingSessionsUpdatePublisher()
+    service = GameSessionService(sessions_update_publisher=publisher)
+
+    created = await service.create_session(uow(repository, checker), actor_id=organizer)
+    assert publisher.events[-1].recipient_user_ids == frozenset({organizer})
+
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=created.session.id
+    )
+    assert publisher.events[-1].recipient_user_ids == frozenset({organizer, player})
+    await service.join_session(
+        uow(repository, checker), actor_id=outsider, session_id=created.session.id
+    )
+    await service.leave_session(
+        uow(repository, checker), actor_id=outsider, session_id=created.session.id
+    )
+    assert publisher.events[-1].recipient_user_ids == frozenset({organizer, player, outsider})
+
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    current = await repository.matches.get_current_for_session(created.session.id)
+    assert current is not None
+    before_result = len(publisher.events)
+    await service.record_session_result(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=current.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    assert len(publisher.events) == before_result
+    await service.complete_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+
+    cancellable = await service.create_session(uow(repository, checker), actor_id=organizer)
+    await service.cancel_session(
+        uow(repository, checker), actor_id=organizer, session_id=cancellable.session.id
+    )
+
+    leave_active = await service.create_session(uow(repository, checker), actor_id=organizer)
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=leave_active.session.id
+    )
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=leave_active.session.id
+    )
+    leave_match = await repository.matches.get_current_for_session(leave_active.session.id)
+    assert leave_match is not None
+    await service.cancel_current_match_and_leave(
+        uow(repository, checker),
+        actor_id=player,
+        session_id=leave_active.session.id,
+        match_id=leave_match.match.id,
+    )
+
+    assert len(publisher.events) == 12
+    assert all(
+        event.recipient_user_ids <= {organizer, player, outsider} for event in publisher.events
+    )
 
 
 @pytest.mark.parametrize(

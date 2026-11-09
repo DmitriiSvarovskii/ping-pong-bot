@@ -140,3 +140,94 @@ stale и concurrent retry дают 409; схема БД не меняется.
 **Почему:** существующие нормализованные факты достаточны и дают повторяемый идемпотентный результат.
 **Следствия:** чтение не пишет в БД, skip/cancel ничего не начисляют, отдельная таблица и миграция не
 нужны; это не глобальная статистика и не Glicko-2.
+
+## ADR-025: Централизованный Telegram viewport controller
+
+**Статус:** принято и реализовано в PS-010.1. **Решение:** frontend bootstrap владеет единственным
+ref-counted controller для Telegram viewport. Он один раз выполняет поддерживаемые imperative calls
+`disableVerticalSwipes()` и mobile-only `requestFullscreen()`/`expand()`, подписывается на viewport и
+оба safe-area event и публикует текущие значения через CSS variables. Последний consumer снимает
+все подписки; повторный mount может подписаться снова, не повторяя fullscreen-запрос. Layout берёт
+максимум из browser env, Telegram CSS variables и bridge values вместо их суммирования. **Почему:**
+системный chrome и viewport меняются независимо от React render и клавиатуры, а Telegram API не
+должен распространяться по страницам. **Следствия:** браузер без bridge остаётся работоспособным,
+нативная iOS-прокрутка сохраняется, глобальный touch `preventDefault()` не используется; Telegram
+по-прежнему может закрыть или свернуть Mini App жестом на собственной верхней панели.
+
+## ADR-026: Одноразовый WebSocket ticket и single-process realtime manager
+
+**Статус:** принято и реализовано в PS-010.3.1. **Решение:** access JWT используется только для
+защищённой HTTP-выдачи opaque ticket. Ticket связан с user/session, имеет короткий TTL, хранится как
+SHA-256 digest и атомарно consume-ится один раз. Browser передаёт его в `Sec-WebSocket-Protocol`
+рядом с публичным `pingstats.v1`; URL остаётся без credentials, сервер не отражает ticket обратно.
+После consume доступ повторно проверяется короткой SQLAlchemy session, закрытой до accept. Sockets
+группирует in-memory manager одного Uvicorn worker. **Почему:** browser WebSocket API не позволяет
+задать Authorization header, а query credentials попадают в access logs/history; Redis и новая
+таблица для текущего single-worker deployment избыточны. **Следствия:** restart инвалидирует tickets
+и sockets; multi-worker требует общего ticket/replay store и Pub/Sub. Business services не
+импортируют manager; транспорт подключён через application-порт.
+
+## ADR-027: Best-effort post-commit invalidation для игровых сессий
+
+**Статус:** принято и реализовано в PS-010.3.2. **Решение:** `GameSessionService` регистрирует в UoW
+keyed callback через application-порт `SessionUpdatePublisher`. UoW выполняет callback только после
+успешного SQL commit, удаляет при rollback и дедуплицирует по `(session.updated, session_id)` в одной
+команде. WebSocket adapter публикует минимальный invalidation через существующий manager; transport
+ошибка журналируется и не меняет committed response. **Почему:** отправка до commit создаёт ложные
+обновления, а отправка внутри транзакции удерживает PostgreSQL lock на сетевой операции. Для UI
+достаточно best-effort сигнала с REST как source of truth. **Следствия:** validation/conflict/replay
+не публикуют; нет фоновых задач и дополнительных транзакций. Механизм не является durable delivery
+и не заменяет ADR-010 transactional outbox. Restart или single-process failure может потерять
+invalidation; multi-worker потребует согласованного Pub/Sub.
+
+## ADR-028: Персональная подписка списка сессий по истории участия
+
+**Статус:** принято и реализовано в PS-010.3.3. **Решение:** list WebSocket использует отдельный
+ticket scope и отдельную user-keyed область существующего connection manager. После lifecycle или
+membership commit `SessionsUpdatePublisher` отправляет `sessions.updated` только UUID пользователей
+из существующей historical participation выборки. Payload не содержит user/session IDs. **Почему:**
+REST `list_for_user` уже определяет видимость через факт участия; глобальное событие раскрывало бы
+активность недоступных сессий. В текущей модели нет public/open session mode, поэтому новая политика
+видимости не вводится. **Следствия:** вышедший исторический участник продолжает получать invalidation
+доступной ему записи, outsider не получает ничего. Result/cancel-match/skip не меняют list card и не
+публикуются. Ticket store, post-commit callbacks и single-process ограничения ADR-026/027 сохранены.
+
+## ADR-029: WebSocket как ускоритель REST с lifecycle-aware fallback
+
+**Статус:** принято и реализовано в PS-010.4.1. **Решение:** frontend controller владеет одним
+WebSocket на consumer, получает новый one-use ticket на каждую попытку, проверяет negotiated
+subprotocol и использует capped exponential backoff с jitter. При нездоровом канале один REST
+fallback interval обеспечивает eventual refresh; successful open останавливает polling и запускает
+full REST sync. Hidden/offline/logout/unmount отменяют ticket и refetch callbacks через AbortSignal,
+закрывают socket и очищают timers/listeners. **Почему:** WebSocket best-effort и не является source
+of truth, а Telegram/iOS регулярно замораживает приложение и сетевые соединения. **Следствия:**
+heartbeat сам по себе не инвалидирует данные; неизвестные/повреждённые сообщения игнорируются.
+401/403, session-ticket 404 и close 4401/4403/4404 не создают бесконечный reconnect. List-ticket
+404 считается временной ошибкой совместимости deployment. Page/query integration выполняется
+отдельно, без изменения transport controller.
+
+## ADR-030: Realtime списка инвалидирует только активную REST-проекцию
+
+**Статус:** принято и реализовано в PS-010.4.2. **Решение:** `/games` включает персональный list
+channel только при готовой авторизации. `sessions.updated`, reconnect и fallback coalesce-ятся:
+list-prefix помечается stale, но refetch выполняется только для текущего paginated TanStack Query
+key; offset и кешированные данные не
+сбрасываются. Fullscreen loader применяется только при первой загрузке, а background error не
+скрывает ранее полученный список. **Почему:** WebSocket сообщает только факт изменения, REST
+остаётся source of truth, а несколько близких lifecycle/event сигналов не должны создавать storm
+запросов. **Следствия:** heartbeat, неизвестный и повреждённый payload не вызывают refetch;
+logout/unmount отменяет consumer через AbortSignal. Другие страницы и session channel этим решением
+не затронуты.
+
+## ADR-031: Session realtime заменяет постоянный polling
+
+**Статус:** принято и реализовано в PS-010.4.3. **Решение:** detail и result routes используют общий
+session-scoped consumer, но каждый route монтирует только собственное соединение. Matching
+`session.updated`, reconnect и fallback coalesce-ятся в invalidation session-prefix; refetch
+выполняется только для активных TanStack Query observers. Постоянный четырёхсекундный polling
+удалён. **Почему:** backend event уже сигнализирует каждое committed изменение, а transport имеет
+контролируемый 15-секундный fallback на время недоступности socket. Параллельный polling создавал бы
+лишние запросы и гонки UI. **Следствия:** REST остаётся source of truth; cached state сохраняется при
+background error. Result draft привязан к `(match.id, version)`: та же revision сохраняет ввод,
+новая монтирует чистый редактор без старого ввода; HTTP 409 блокирует submit и остаётся обязательным recovery для гонки между
+последним refetch и записью.

@@ -87,6 +87,12 @@ server-state профиля, React Router — навигацией, UI не во
 
 Один command use case = один UoW = одна транзакция. Application-сервис получает репозитории через UoW, блокирует корень изменяемого агрегата, проверяет authorization/invariants, сохраняет изменения и outbox events, затем commit. Внешняя доставка выполняется после commit.
 
+`SqlAlchemyUnitOfWork` поддерживает keyed best-effort callbacks после commit. Callback регистрируется
+до commit, дедуплицируется по ключу в пределах команды, очищается при rollback и запускается только
+после завершения SQL-транзакции. Ошибка callback журналируется, но не меняет уже зафиксированный
+результат команды. Этот механизм применяется к эфемерным UI invalidations; он не заменяет
+transactional outbox для гарантированной доставки доменных событий.
+
 Один lazy `AsyncEngine` и один `async_sessionmaker` создаются на lifespan приложения и освобождаются при shutdown. Сеть не используется до первого SQL-запроса, поэтому недоступность PostgreSQL не блокирует запуск и обычный `/health`. Request-scoped `AsyncSession` никогда не выполняет неявный commit. `SqlAlchemyUnitOfWork` открывает транзакцию в async context manager, требует явного `commit`, откатывает незавершённую транзакцию при обычном выходе или исключении и всегда закрывает session. Репозитории не владеют транзакцией.
 
 Ключевые блокировки:
@@ -229,8 +235,51 @@ PS-009.3 добавляет read-only session statistics projection. Application
 исторические profiles участников и только завершённые session matches с participants/sets, считает
 результат без записи и детерминированно сортирует его. PostgreSQL adapter загружает matches,
 participants/users и sets тремя bulk-запросами независимо от числа матчей; N+1 отсутствует.
-Отдельный `/statistics` endpoint использует те же access checks. Frontend polling и общая session
-query invalidation обновляют историю и лидерборд после результата, а cancel/skip не меняют проекцию.
+Отдельный `/statistics` endpoint использует те же access checks. Общая session query invalidation
+обновляет историю и лидерборд после результата, а cancel/skip не меняют проекцию.
+
+PS-010.3.1 добавляет single-process realtime adapter без изменения session domain. JWT остаётся
+только HTTP credential: защищённый `POST /game-sessions/{id}/ws-ticket` после обычной проверки
+участия выдаёт opaque one-use ticket, связанный с user/session и коротким TTL. В памяти хранится
+только SHA-256 digest. Browser передаёт ticket как отдельный `Sec-WebSocket-Protocol` value, поэтому
+долгоживущий JWT и ticket не попадают в URL. Ticket атомарно consume-ится до handshake, после чего
+доступ повторно проверяет `SqlAlchemyWebSocketSessionAuthorizer` внутри отдельной короткой session;
+до `WebSocket.accept()` соединение с БД уже закрыто.
+
+`WebSocketConnectionManager` хранит только socket/user grouping по session UUID, поддерживает
+несколько клиентов, изолированный broadcast и удаление failed/disconnected sockets. Lifespan
+закрывает все sockets и очищает tickets. Heartbeat обнаруживает разрыв на следующей receive/send
+операции. Канал передаёт только invalidation metadata `session.updated`; frontend перечитывает REST.
+
+PS-010.3.2 добавляет application-порт `SessionUpdatePublisher`. `GameSessionService` регистрирует
+один keyed callback только в реально изменяющей ветке команды; `SqlAlchemyUnitOfWork` выполняет его
+после успешного commit. Infrastructure adapter преобразует событие в существующий контракт и
+вызывает `WebSocketConnectionManager.broadcast` только для UUID изменённой сессии. Публикуют create,
+join, leave, start, complete/cancel session, incremental/full result, cancel match,
+cancel-and-leave и skip one/both. Validation/conflict/rollback и семантический retry результата не
+публикуют событие. Ошибка socket или broadcast не открывает новую транзакцию и не отменяет command.
+In-memory store, publisher и manager корректны только для одного Uvicorn worker; multi-worker
+deployment потребует Redis Pub/Sub либо другого согласованного межпроцессного broker и общего
+one-use ticket store.
+
+Production gate для текущего single-process adapter: один Uvicorn worker/process и Nginx proxy с
+HTTP/1.1, WebSocket `Upgrade`/`Connection` forwarding и read timeout больше heartbeat-интервала.
+Конфигурация Nginx/service manager находится вне репозитория и должна проверяться отдельно перед
+deployment; кодовая конфигурация не может подтвердить соблюдение этого ограничения.
+
+PS-010.3.3 расширяет тот же ticket store отдельным scope `sessions_list` и тот же manager — отдельной
+user-keyed картой соединений. `/game-sessions/ws` никогда не попадает в session-keyed map, поэтому
+`session.updated` и `sessions.updated` не смешиваются. Application-порт `SessionsUpdatePublisher`
+принимает только множество разрешённых user UUID и timestamp; WebSocket payload user/session IDs не
+содержит. Аудитория вычисляется внутри исходной транзакции из существующей истории участия, которая
+полностью совпадает с predicate REST `list_for_user`. Create, join, leave, start, complete, pending
+cancel и cancel-and-leave регистрируют один отдельный keyed callback. Результаты и queue-only
+операции не меняют текущие поля list card и list invalidation не публикуют.
+
+Свободные игровые сессии сейчас не имеют public/open visibility mode: они видны только историческим
+участникам. Поэтому глобальный list broadcast отсутствует; посторонний user connection не получает
+даже факт активности закрытой сессии. Если публичный каталог появится как отдельное продуктовое
+решение, его аудитория и канал потребуют самостоятельной visibility policy.
 
 ## 8. Турнир single elimination
 
@@ -281,6 +330,61 @@ Downstream match после исправления не удаляется. Ес
 `POST /auth/dev-login`; Vite полностью исключает этот adapter из production bundle. Vite dev proxy
 направляет `/api` в локальный Uvicorn. UI использует Telegram theme variables, safe-area insets и
 responsive mobile layout.
+
+Telegram viewport инициализируется централизованно в auth bootstrap. На мобильных клиентах bridge
+однократно вызывает `disableVerticalSwipes()` при наличии Bot API 7.7+, затем сохраняет прежнюю
+стратегию `requestFullscreen()` для Bot API 8.0+ с `expand()` как fallback. Один ref-counted
+controller подписывается на `viewportChanged`, `safeAreaChanged` и `contentSafeAreaChanged`,
+синхронизирует значения bridge в CSS variables и снимает подписки после последнего consumer.
+Layout выбирает максимум между browser `env(safe-area-inset-*)`, Telegram CSS variables и
+динамическими bridge values: insets не складываются и поэтому не применяются дважды. Высота
+`viewportHeight` обновляет shell, включая изменение viewport при появлении клавиатуры; вертикальная
+прокрутка остаётся нативной и не перехватывает touch-события.
+
+Глобальная типографика Mini App использует локальные WOFF2 subsets Montserrat для кириллицы и
+латиницы с диапазоном weights 400–700 и системным sans-serif fallback; runtime-запросов к font CDN
+нет. Route-level страницы используют единый `useTelegramBackButton`: форма результата возвращает в
+сессию, а сессия — в `/games`. Hook держит один bridge-handler, читает актуальный callback через ref
+и симметрично выполняет `onClick`/`offClick`, поэтому переходы между этими страницами не накапливают
+обработчики.
+
+PS-010.4.1 добавляет общий frontend слой `src/realtime`. `RealtimeClient` получает ticket
+существующим memory-token `ApiClient`, строит
+same-origin `ws/wss` URL без credentials и передаёт ticket только в `Sec-WebSocket-Protocol` рядом с
+`pingstats.v1`. На каждый reconnect запрашивается новый ticket; 401/403, session-ticket 404 и
+WebSocket 4401/4403/4404 останавливают автоматический цикл до явного lifecycle resume или нового
+consumer. List-ticket 404 остаётся временной transport/deployment ошибкой.
+
+Controller владеет одним socket/ticket request/reconnect timeout/fallback interval. Reconnect
+использует capped exponential backoff с jitter. При нездоровом socket один REST fallback работает
+раз в 15 секунд, а healthy open отключает polling и вызывает full-sync callback. Visibility hidden
+и offline останавливают сеть; visible/online получают новый ticket и после open синхронизируют REST.
+Callbacks получают `AbortSignal`; logout/unmount отменяют их, закрывают socket и удаляют listeners.
+React hook использует generation guards и callback refs, поэтому Strict Mode и rerender не создают
+параллельные соединения.
+
+PS-010.4.2 подключает list channel к `/games` через тот же `useRealtimeChannel`. Consumer включён
+только при `authenticated`, а `sessions.updated`, successful open/reconnect и fallback помечают
+устаревшим list-prefix и выполняют один coalesced refetch активного key
+`['game-sessions', 'list', offset]`. REST остаётся
+источником данных; heartbeat/unknown/malformed transport не доходят до invalidation. Offset и
+кешированные данные не сбрасываются, background error не заменяет уже показанный список, а
+AbortSignal отменяет refetch после смены страницы/logout.
+
+PS-010.4.3 подключает session channel к отдельным route `/games/:sessionId` и
+`/games/:sessionId/result` через общий `useSessionRealtime`; одновременно существует только consumer
+смонтированного route. Событие с чужим session UUID игнорируется. Matching `session.updated`, open,
+reconnect и fallback помечают stale prefix `['game-sessions', sessionId]` и одним coalesced циклом
+перечитывают только активные detail/participants/queue/current-match/history/statistics observers.
+Четырёхсекундный polling удалён; healthy socket не создаёт interval REST-запросов. Cached data
+остаётся видимой при background error, а смена route/session/auth abort-ит refetch и закрывает старый
+socket.
+
+Result route отслеживает revision текущего матча как `(match.id, version)`. Обычный background
+refetch той же revision не меняет draft. Для новой revision монтируется чистый редактор без старого
+счёта, а HTTP 409 сохраняет существующий явный recovery flow и блокирует повтор. Поэтому результат
+старого матча нельзя случайно отправить для successor, а backend validation и optimistic version
+остаются последней защитой гонки.
 
 ## 11. Read models, события и отказоустойчивость
 

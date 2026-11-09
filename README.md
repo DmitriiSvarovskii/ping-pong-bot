@@ -74,6 +74,8 @@ DB_MAX_OVERFLOW=10
 JWT_SECRET_KEY=replace-with-a-random-secret-of-at-least-32-characters
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
+WEBSOCKET_TICKET_TTL_SECONDS=30
+WEBSOCKET_HEARTBEAT_INTERVAL_SECONDS=25
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_INIT_DATA_MAX_AGE_SECONDS=300
 DEV_USER_ID=00000000-0000-4000-8000-000000000001
@@ -177,8 +179,47 @@ participant может выйти обычным `/leave`, current player — т
 `cancel-and-leave`. Session match нельзя исправить через standalone API: безопасный correction
 workflow, рейтинг и statistics остаются ограничениями MVP текущего этапа.
 
+### WebSocket-инфраструктура
+
+Realtime transport использует двухшаговую авторизацию без JWT в URL:
+
+1. Участник вызывает `POST /api/v1/game-sessions/{id}/ws-ticket` с Bearer JWT.
+2. Browser открывает `wss://<host>/api/v1/game-sessions/{id}/ws` с subprotocols
+   `pingstats.v1` и `pingstats.ticket.<ticket>`.
+
+Ticket одноразовый, живёт по умолчанию 30 секунд и не кэшируется. Socket получает heartbeat.
+Успешные изменения игровой сессии после commit публикуют один `session.updated`, который служит
+только сигналом перечитать REST. Rollback, validation/conflict и идемпотентный повтор результата
+ничего не публикуют; ошибка socket не отменяет сохранённую команду. Manager работает в памяти одного
+Uvicorn worker; для нескольких workers позже потребуется согласованный межпроцессный transport,
+например Redis Pub/Sub.
+
+Для персонального списка используется отдельная пара `POST /api/v1/game-sessions/ws-ticket` и
+`WS /api/v1/game-sessions/ws`. После committed create/join/leave/start/complete/cancel сервер
+отправляет `sessions.updated` только историческим участникам изменённой сессии. Event не раскрывает
+session ID или профили и означает только необходимость перечитать существующий REST-список.
+
+Frontend transport для обоих каналов использует новый ticket на каждую
+попытку, проверка subprotocol, reconnect с backoff/jitter, lifecycle pause и 15-секундный REST
+fallback. Страница «Мои игры» уже подключает list channel после авторизации и незаметно перечитывает
+текущую страницу через TanStack Query при event/reconnect/fallback. Detail и result routes используют
+session channel для фонового обновления состояния, участников, очереди, текущего матча, истории и
+статистики; постоянный polling active-сессии удалён.
+
+Перед production deployment realtime требует отдельной операционной проверки, поскольку Nginx и
+service manager не хранятся в этом репозитории:
+
+- Uvicorn запускается ровно с одним worker/process; несколько независимых процессов несовместимы с
+  текущими in-memory tickets и connection manager;
+- Nginx location для `/api/` использует HTTP/1.1 и передаёт `Upgrade: $http_upgrade` вместе с
+  `Connection: $connection_upgrade` (обычно через `map`);
+- `proxy_read_timeout` больше heartbeat-интервала 25 секунд, рекомендуемый минимум — 60 секунд;
+- Upgrade проверяется реальным authenticated handshake обоих каналов после deployment.
+
+До подтверждения этих пунктов realtime-часть нельзя считать операционно готовой к production.
+
 Полный список request/response схем и ошибок приведён в `docs/API.md`. Swagger UI показывает
-Bearer JWT security и все 15 session paths.
+Bearer JWT security и все HTTP-контракты игровых сессий; WebSocket-контракты описаны отдельно.
 
 Типовые ошибки:
 

@@ -15,6 +15,13 @@ from pingstats.infrastructure.database.engine import Database
 from pingstats.modules.auth.api import development_auth_router, telegram_auth_router
 from pingstats.modules.friendships.api import friends_router
 from pingstats.modules.game_sessions.api import game_sessions_router
+from pingstats.modules.game_sessions.realtime import (
+    SqlAlchemyWebSocketSessionAuthorizer,
+    WebSocketConnectionManager,
+    WebSocketSessionsUpdatePublisher,
+    WebSocketSessionUpdatePublisher,
+    WebSocketTicketStore,
+)
 from pingstats.modules.matches.api import matches_router
 from pingstats.modules.users.api import users_router
 
@@ -26,9 +33,14 @@ def create_lifespan(settings: Settings):
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         database = Database.from_settings(settings)
         application.state.database = database
+        application.state.websocket_session_authorizer = SqlAlchemyWebSocketSessionAuthorizer(
+            database.session_factory
+        )
         try:
             yield
         finally:
+            await application.state.websocket_connection_manager.close_all()
+            await application.state.websocket_ticket_store.clear()
             await database.dispose()
 
     return lifespan
@@ -48,6 +60,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=create_lifespan(resolved_settings),
     )
     application.state.settings = resolved_settings
+    application.state.websocket_ticket_store = WebSocketTicketStore(
+        ttl_seconds=resolved_settings.websocket_ticket_ttl_seconds
+    )
+    application.state.websocket_connection_manager = WebSocketConnectionManager()
+    application.state.session_update_publisher = WebSocketSessionUpdatePublisher(
+        application.state.websocket_connection_manager
+    )
+    application.state.sessions_update_publisher = WebSocketSessionsUpdatePublisher(
+        application.state.websocket_connection_manager
+    )
     application.add_exception_handler(ApplicationError, application_error_handler)
     application.include_router(api_router, prefix=resolved_settings.api_v1_prefix)
     application.include_router(users_router, prefix=resolved_settings.api_v1_prefix)

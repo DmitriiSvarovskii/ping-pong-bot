@@ -12,6 +12,9 @@ import { useAuth } from '../auth/AuthProvider'
 
 export const sessionKeys = {
   all: ['game-sessions'] as const,
+  lists: ['game-sessions', 'list'] as const,
+  list: (offset: number) => ['game-sessions', 'list', offset] as const,
+  session: (id: string) => ['game-sessions', id] as const,
   detail: (id: string) => ['game-sessions', id, 'detail'] as const,
   participants: (id: string) => ['game-sessions', id, 'participants'] as const,
   queue: (id: string) => ['game-sessions', id, 'queue'] as const,
@@ -25,35 +28,28 @@ export function useGameSession(sessionId: string) {
   const detail = useQuery({
     queryKey: sessionKeys.detail(sessionId),
     queryFn: ({ signal }) => getSession(apiClient, sessionId, signal),
-    refetchInterval: (query) => query.state.data?.status === 'active' ? 4_000 : false,
   })
-  const isActive = detail.data?.status === 'active'
   const participants = useQuery({
     queryKey: sessionKeys.participants(sessionId),
     queryFn: ({ signal }) => listParticipants(apiClient, sessionId, signal),
-    refetchInterval: isActive ? 4_000 : false,
   })
   const queue = useQuery({
     queryKey: sessionKeys.queue(sessionId),
     queryFn: ({ signal }) => getSessionQueue(apiClient, sessionId, signal),
     enabled: detail.data?.status === 'active',
-    refetchInterval: isActive ? 4_000 : false,
   })
   const currentMatch = useQuery({
     queryKey: sessionKeys.currentMatch(sessionId),
     queryFn: ({ signal }) => getCurrentSessionMatch(apiClient, sessionId, signal),
     enabled: detail.data?.status === 'active',
-    refetchInterval: isActive ? 4_000 : false,
   })
   const matches = useQuery({
     queryKey: sessionKeys.matches(sessionId),
     queryFn: ({ signal }) => listSessionMatches(apiClient, sessionId, signal),
-    refetchInterval: isActive ? 4_000 : false,
   })
   const statistics = useQuery({
     queryKey: sessionKeys.statistics(sessionId),
     queryFn: ({ signal }) => getSessionStatistics(apiClient, sessionId, signal),
-    refetchInterval: isActive ? 4_000 : false,
   })
   return { detail, participants, queue, currentMatch, matches, statistics }
 }

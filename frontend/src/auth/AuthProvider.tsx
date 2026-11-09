@@ -65,10 +65,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const controller = new AbortController()
+    let cleanupTelegram: () => void = () => undefined
     async function bootstrap() {
       await Promise.resolve()
       if (controller.signal.aborted) return
       const telegram = initializeTelegram()
+      cleanupTelegram = () => telegram.cleanup()
       if (telegram.initData) {
         await authenticateTelegram(telegram.initData, controller.signal)
       } else if (import.meta.env.DEV) {
@@ -78,7 +80,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
     void bootstrap()
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      cleanupTelegram()
+    }
   }, [attempt, authenticateTelegram])
 
   const profile = useQuery({

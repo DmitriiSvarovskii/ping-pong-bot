@@ -18,6 +18,8 @@ def test_default_settings() -> None:
     assert settings.api_v1_prefix == "/api/v1"
     assert settings.db_host == "127.0.0.1"
     assert settings.db_port == 5432
+    assert settings.websocket_ticket_ttl_seconds == 30
+    assert settings.websocket_heartbeat_interval_seconds == 25
     assert settings.telegram_bot_token.get_secret_value() == ""
     assert settings.telegram_init_data_max_age_seconds == 300
 

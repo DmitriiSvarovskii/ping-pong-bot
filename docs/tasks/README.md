@@ -78,6 +78,15 @@
 | PS-009.2 | Пропуск матча и управление ротацией — завершено | Явно выбрать уходящих со стола без результата матча | PS-009.1, PS-007.5b | Pure skip rotation, atomic backend command/API/audit, first/second/both modal, concurrency/rollback/frontend tests | Cancel semantics сохранена; stale/concurrent skip не создаёт второй active match; проверки проходят |
 | PS-009.3 | История матчей и статистика сессии — завершено | Показать время завершения и session-only лидерборд | PS-009.2 | Derived read projection из historical participants/completed matches/sets, bulk PostgreSQL loading, top-5 mobile UI, query invalidation, tests | Вышедшие/нулевые участники сохранены; cancel/skip исключены; API/frontend/build/quality checks проходят |
 | PS-009.5.1 | Финальная проверка и подготовка релиза — завершено | Проверить совместимость и регрессии PS-009.1–009.3 | PS-009.3 | Полные backend/frontend/PostgreSQL/concurrency/Alembic/git checks; release-only bug fixes | Все проверки проходят; ошибки statistics API имеют retry UI; миграции и инфраструктурные изменения не требуются |
+| PS-010.1 | Telegram Safe Area, Fullscreen и прокрутка — завершено | Защитить mobile layout от Telegram chrome и системного жеста сворачивания | PS-009.5.1 | Central viewport controller, `disableVerticalSwipes`, dynamic viewport/safe-area events, CSS fallbacks и lifecycle tests | Imperative calls не дублируются; подписки очищаются; browser/mobile fallback, tests, typecheck, lint и build проходят |
+| PS-010.2 | Улучшение интерфейса — завершено | Локальная типографика, полные имена current match и последовательная Back Button навигация | PS-010.1 | Montserrat WOFF2 Cyrillic/Latin 400–700, адаптивные A/B cards, общий stable Back Button hook для result/session routes | Нет runtime font CDN и horizontal overflow; result → session → games работает с одним handler; frontend quality checks проходят |
+| PS-010.3.1 | WebSocket-инфраструктура — завершено | Безопасный realtime transport для session invalidations | PS-010.2, PS-008.1 | One-use HTTP ticket, subprotocol auth, short-lived DB access check, in-memory connection manager, heartbeat и tests | JWT/ticket не попадают в URL; replay/expiry/access/isolation/cleanup проверены; socket не удерживает DB session |
+| PS-010.3.2 | Realtime-события игровых сессий — завершено | Инвалидировать session REST state после committed mutations | PS-010.3.1, PS-007.5b | Publisher port, keyed post-commit callbacks, manager adapter, mutation/rollback/race tests | Ровно одно событие успешной команды; rollback/conflict/replay молчат; broadcast не удерживает и не отменяет DB transaction |
+| PS-010.3.3 | Realtime списка «Мои игры» — завершено | Персонально инвалидировать REST session list без утечки закрытой активности | PS-010.3.2 | Scoped one-use ticket, user-keyed connections, participant audience, post-commit list publisher, privacy/race tests | Несколько client connections поддержаны; outsider и session channel не получают list event; rollback/conflict молчат |
+| PS-010.4.1 | Frontend WebSocket transport — завершено | Безопасное ticket connection/reconnect и REST fallback без page integration | PS-010.3.3 | Reusable controller/hook, protocol parser, lifecycle suspension, backoff+jitter, AbortSignal cleanup, fake-timer tests | Нет credentials в URL/storage; один socket/poll timer; auth errors terminate retries; Strict Mode и recovery проверены |
+| PS-010.4.2 | Realtime списка «Мои игры» — завершено | Обновлять list projection без reload и постоянного polling | PS-010.4.1 | Auth-gated list consumer, paginated TanStack Query invalidation, coalescing, cached-data UX, page tests | Event/reconnect/fallback перечитывают REST; offset сохраняется; heartbeat не refetch; unmount/logout безопасны |
+| PS-010.4.3 | Автоматическое обновление игровой сессии — завершено | Синхронизировать detail/result routes без постоянного polling | PS-010.4.2 | Session consumer, prefix invalidation, six REST projections, draft revision guard, race/lifecycle tests | Event/reconnect/fallback coalesce; session switch закрывает socket; cached UX и stale result защищены |
+| PS-010.5.1 | Полная регрессия и аудит PS-010 — завершено с operational warning | Проверить realtime, gameplay, auth и production prerequisites | PS-010.4.3 | Backend/frontend/PostgreSQL/concurrency/Alembic/static/security audit; terminal session-404 fix | Все локальные проверки проходят; deployment требует подтверждения Nginx Upgrade и single-worker Uvicorn |
 
 ## Этап 6 — турниры
 
@@ -125,5 +134,6 @@
 
 ## Следующая задача
 
-PS-009.5.1 завершён. Проект готов к отдельному этапу PS-009.5.2, но публикацию не начинать без
-явной команды заказчика.
+PS-010.5.1 завершён со статусом PASS WITH WARNINGS. Перед deployment необходимо отдельно подтвердить
+production Nginx WebSocket Upgrade/read timeout и запуск ровно одного Uvicorn worker/process.
+Deployment не начинать без отдельной явной команды заказчика.

@@ -18,6 +18,10 @@ from pingstats.modules.game_sessions.application.errors import (
     GameSessionCurrentPlayerLeaveError,
     GameSessionStateError,
 )
+from pingstats.modules.game_sessions.application.realtime import (
+    SessionsUpdatedEvent,
+    SessionUpdatedEvent,
+)
 from pingstats.modules.game_sessions.application.service import GameSessionService
 from pingstats.modules.game_sessions.domain import GameSessionEventType, GameSessionStatus
 from pingstats.modules.game_sessions.infrastructure.models import (
@@ -117,6 +121,75 @@ class FailingSuccessorUow(SqlAlchemyUnitOfWork):
         self.current_matches = SqlAlchemyCurrentSessionMatchChecker(self.session)
         self.matches = FailingSuccessorMatchRepository(self.session)
         return self
+
+
+class RecordingPublisher:
+    def __init__(self) -> None:
+        self.events: list[SessionUpdatedEvent] = []
+        self.observed_active_transactions: list[bool] = []
+        self.current_uow: SqlAlchemyUnitOfWork | None = None
+        self.fail = False
+
+    async def publish(self, event: SessionUpdatedEvent) -> None:
+        if self.current_uow is not None:
+            self.observed_active_transactions.append(self.current_uow.session.in_transaction())
+        self.events.append(event)
+        if self.fail:
+            raise RuntimeError("injected broadcast failure")
+
+
+class RecordingListPublisher:
+    def __init__(self) -> None:
+        self.events: list[SessionsUpdatedEvent] = []
+        self.observed_active_transactions: list[bool] = []
+        self.current_uow: SqlAlchemyUnitOfWork | None = None
+        self.fail = False
+
+    async def publish(self, event: SessionsUpdatedEvent) -> None:
+        if self.current_uow is not None:
+            self.observed_active_transactions.append(self.current_uow.session.in_transaction())
+        self.events.append(event)
+        if self.fail:
+            raise RuntimeError("injected list broadcast failure")
+
+
+async def test_realtime_publication_follows_commit_and_never_rollback(
+    session_service_database: tuple[async_sessionmaker[AsyncSession], tuple[UUID, UUID, UUID]],
+) -> None:
+    session_factory, (organizer, _, _) = session_service_database
+    publisher = RecordingPublisher()
+    list_publisher = RecordingListPublisher()
+    service = GameSessionService(
+        session_update_publisher=publisher,
+        sessions_update_publisher=list_publisher,
+    )
+
+    publisher.current_uow = FailingEventUow(session_factory)
+    list_publisher.current_uow = publisher.current_uow
+    with pytest.raises(RuntimeError, match="injected event failure"):
+        await service.create_session(publisher.current_uow, actor_id=organizer)
+    assert publisher.events == []
+    assert list_publisher.events == []
+
+    publisher.current_uow = SqlAlchemyGameSessionsUnitOfWork(session_factory)
+    list_publisher.current_uow = publisher.current_uow
+    created = await service.create_session(publisher.current_uow, actor_id=organizer)
+    assert [event.session_id for event in publisher.events] == [created.session.id]
+    assert publisher.observed_active_transactions == [False]
+    assert list_publisher.observed_active_transactions == [False]
+
+    publisher.fail = True
+    list_publisher.fail = True
+    publisher.current_uow = SqlAlchemyGameSessionsUnitOfWork(session_factory)
+    list_publisher.current_uow = publisher.current_uow
+    committed_despite_failure = await service.create_session(
+        publisher.current_uow, actor_id=organizer, name="Broadcast failure"
+    )
+    async with session_factory() as session:
+        stored = await session.get(GameSessionModel, committed_despite_failure.session.id)
+    assert stored is not None
+    assert publisher.observed_active_transactions[-1] is False
+    assert list_publisher.observed_active_transactions[-1] is False
 
 
 async def test_lifecycle_history_events_and_create_rollback_are_transactional(
@@ -357,7 +430,12 @@ async def test_queue_rotation_leave_restore_and_idempotency_are_transactional(
 async def test_concurrent_join_start_and_join_vs_complete_are_serialized() -> None:
     database = Database.from_settings(Settings())
     organizer, player, late_player = uuid4(), uuid4(), uuid4()
-    service = GameSessionService()
+    publisher = RecordingPublisher()
+    list_publisher = RecordingListPublisher()
+    service = GameSessionService(
+        session_update_publisher=publisher,
+        sessions_update_publisher=list_publisher,
+    )
     session_id: UUID | None = None
     try:
         async with database.session_factory() as session:
@@ -447,6 +525,9 @@ async def test_concurrent_join_start_and_join_vs_complete_are_serialized() -> No
         assert stored is not None and stored.status is GameSessionStatus.COMPLETED
         assert active_player_count == 1
         assert event_count in (8, 10)
+        successful_late_join = not isinstance(completion_race[0], BaseException)
+        assert len(publisher.events) == 4 + successful_late_join
+        assert len(list_publisher.events) == 4 + successful_late_join
     finally:
         async with database.session_factory() as session:
             if session_id is not None:
@@ -644,7 +725,12 @@ async def test_concurrent_rotation_join_leave_and_result_retry_preserve_queue() 
     database = Database.from_settings(Settings())
     organizer, second, third, fourth, late = (uuid4() for _ in range(5))
     user_ids = (organizer, second, third, fourth, late)
-    service = GameSessionService()
+    publisher = RecordingPublisher()
+    list_publisher = RecordingListPublisher()
+    service = GameSessionService(
+        session_update_publisher=publisher,
+        sessions_update_publisher=list_publisher,
+    )
     session_id: UUID | None = None
     try:
         async with database.session_factory() as session:
@@ -690,6 +776,8 @@ async def test_concurrent_rotation_join_leave_and_result_retry_preserve_queue() 
             )
         )
         assert repeated[0] == repeated[1]
+        assert len(publisher.events) == 6
+        assert len(list_publisher.events) == 5
 
         assert repeated[0].current_match is not None
         join_rotation = await asyncio.gather(

@@ -72,6 +72,59 @@ describe('game sessions frontend', () => {
     expect(screen.getByText('Следующий')).toBeInTheDocument()
   })
 
+  it('renders full current-match names with spaces and without spaces', async () => {
+    const spacedName = user(USER_A.id, 'Александр', 'Очень Длинная Фамилия')
+    const unbrokenName = user(USER_B.id, 'Сверхдлинноеимябезпробелов')
+    const participants = [participant('pa', spacedName), participant('pb', unbrokenName)]
+    const currentMatch = {
+      ...match(),
+      participants: [
+        { position: 1 as const, user: spacedName },
+        { position: 2 as const, user: unbrokenName },
+      ],
+    }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(
+          jsonResponse(session({ status: 'active', active_participants: participants })),
+        )
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(
+          jsonResponse({ items: participants, total: 2, limit: 100, offset: 0 }),
+        )
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(
+          jsonResponse({
+            current_pair: [queueItem('pa', spacedName.id), queueItem('pb', unbrokenName.id)],
+            waiting: [],
+            is_paused: false,
+          }),
+        )
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(currentMatch))
+      if (url.includes('/matches')) {
+        return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    const { container } = renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+    await screen.findByText('Текущий матч')
+
+    const names = [...container.querySelectorAll('.current-match-player-name')]
+    expect(names).toHaveLength(2)
+    expect(names[0]).toHaveTextContent('Александр Очень Длинная Фамилия')
+    expect(names[1]).toHaveTextContent('Сверхдлинноеимябезпробелов')
+  })
+
   it('records a full result and displays the server-selected winner', async () => {
     mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
     renderRoute(<ResultPage />, `/games/${SESSION_ID}/result`, '/games/:sessionId/result')
@@ -147,6 +200,131 @@ describe('game sessions frontend', () => {
     expect(hide).toHaveBeenCalledOnce()
   })
 
+  it('returns from a session to My Games through Telegram Back Button', async () => {
+    let telegramBack: (() => void) | undefined
+    const offClick = vi.fn()
+    const hide = vi.fn()
+    window.Telegram = {
+      WebApp: {
+        initData: 'signed',
+        colorScheme: 'light',
+        platform: 'ios',
+        version: '9.0',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        BackButton: {
+          show: vi.fn(),
+          hide,
+          onClick: vi.fn((callback: () => void) => { telegramBack = callback }),
+          offClick,
+        },
+      },
+    }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'active' })))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(
+          jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }),
+        )
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(
+          jsonResponse({
+            current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)],
+            waiting: [queueItem('pc', USER_C.id)],
+            is_paused: false,
+          }),
+        )
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) {
+        return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+    renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+    await screen.findByText('Текущий матч')
+
+    act(() => telegramBack?.())
+
+    expect(await screen.findByText('/games')).toBeInTheDocument()
+    expect(offClick).toHaveBeenCalledWith(expect.any(Function))
+    expect(hide).toHaveBeenCalledOnce()
+  })
+
+  it('rebinds Telegram Back Button from result to session and then My Games', async () => {
+    const activeHandlers = new Set<() => void>()
+    const onClick = vi.fn((callback: () => void) => activeHandlers.add(callback))
+    const offClick = vi.fn((callback: () => void) => activeHandlers.delete(callback))
+    window.Telegram = {
+      WebApp: {
+        initData: 'signed',
+        colorScheme: 'light',
+        platform: 'ios',
+        version: '9.0',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        BackButton: { show: vi.fn(), hide: vi.fn(), onClick, offClick },
+      },
+    }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'active' })))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(
+          jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }),
+        )
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(
+          jsonResponse({
+            current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)],
+            waiting: [queueItem('pc', USER_C.id)],
+            is_paused: false,
+          }),
+        )
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) {
+        return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[`/games/${SESSION_ID}/result`]}>
+          <Routes>
+            <Route path="/games/:sessionId/result" element={<ResultPage />} />
+            <Route path="/games/:sessionId" element={<SessionPage />} />
+            <Route path="*" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    await screen.findByText('Записать результат')
+    expect(activeHandlers.size).toBe(1)
+
+    act(() => [...activeHandlers][0]?.())
+    await screen.findByRole('heading', { name: 'Тестовая игра' })
+    expect(activeHandlers.size).toBe(1)
+
+    act(() => [...activeHandlers][0]?.())
+    expect(await screen.findByText('/games')).toBeInTheDocument()
+    await waitFor(() => expect(activeHandlers.size).toBe(0))
+    expect(onClick).toHaveBeenCalledTimes(2)
+    expect(offClick).toHaveBeenCalledTimes(2)
+  })
+
   it('renders result entry safely without the Telegram API', async () => {
     delete window.Telegram
     mockResultFlow(commandResponse(match({ status: 'completed', winnerId: USER_A.id }), nextMatch()))
@@ -184,6 +362,85 @@ describe('game sessions frontend', () => {
     expect(putCount).toBe(1)
   })
 
+  it('preserves an entered score when the same current match is refetched', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (requestUrl(input).includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(match()))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    const { client } = renderRoute(
+      <ResultPage />,
+      `/games/${SESSION_ID}/result`,
+      '/games/:sessionId/result',
+    )
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '7')
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.currentMatch(SESSION_ID) })
+    })
+
+    expect(screen.getByLabelText('Счёт Анна')).toHaveValue('7')
+    expect(screen.queryByText('Матч уже изменился')).not.toBeInTheDocument()
+  })
+
+  it('clears a draft when realtime data points to another current match', async () => {
+    let current = match()
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (requestUrl(input).includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(current))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    const { client } = renderRoute(
+      <ResultPage />,
+      `/games/${SESSION_ID}/result`,
+      '/games/:sessionId/result',
+    )
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '7')
+
+    current = nextMatch()
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.currentMatch(SESSION_ID) })
+    })
+
+    expect(await screen.findByText('МАТЧ #2')).toBeInTheDocument()
+    expect(screen.getByLabelText('Счёт Анна')).toHaveValue('0')
+    expect(screen.queryByText('Матч уже изменился')).not.toBeInTheDocument()
+  })
+
+  it('removes result submission when the current match was already completed elsewhere', async () => {
+    let current: SessionMatch | null = match()
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (requestUrl(input).includes('/matches/current')) {
+        return current
+          ? Promise.resolve(jsonResponse(current))
+          : Promise.resolve(jsonResponse({ error: { code: 'not_found', message: 'Not found' } }, 404))
+      }
+      return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+    })
+    const { client } = renderRoute(
+      <ResultPage />,
+      `/games/${SESSION_ID}/result`,
+      '/games/:sessionId/result',
+    )
+    const score = await screen.findByLabelText('Счёт Анна')
+    await userEvent.clear(score)
+    await userEvent.type(score, '7')
+
+    current = null
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.currentMatch(SESSION_ID) })
+    })
+
+    expect(await screen.findByText('Активного матча нет')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Сохранить результат' })).not.toBeInTheDocument()
+  })
+
   it('joins through an invitation route before opening the protected session', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(session()))
     renderRoute(<SessionInvitePage />, `/games/${SESSION_ID}/invite`, '/games/:sessionId/invite')
@@ -216,6 +473,65 @@ describe('game sessions frontend', () => {
     expect(completeCalls).toBe(0)
     await userEvent.click(screen.getByRole('button', { name: 'Подтвердить' }))
     await waitFor(() => expect(completeCalls).toBe(1))
+  })
+
+  it('renders a session completion received by a background refresh', async () => {
+    let detail = session({ status: 'active' })
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }))
+      }
+      if (url.includes('/queue')) {
+        return Promise.resolve(jsonResponse({ current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)], waiting: [queueItem('pc', USER_C.id)], is_paused: false }))
+      }
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+    const { client } = renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+    await screen.findByText('Текущий матч')
+
+    detail = session({ status: 'completed', completed_at: '2026-11-09T10:00:00Z' })
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.detail(SESSION_ID) })
+    })
+
+    expect(await screen.findByText('Завершена')).toBeInTheDocument()
+    expect(screen.queryByText('Текущий матч')).not.toBeInTheDocument()
+  })
+
+  it('keeps cached session content when a background detail refresh fails', async () => {
+    let failDetail = false
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        if (failDetail) {
+          return Promise.resolve(jsonResponse({ error: { code: 'unavailable', message: 'Unavailable' } }, 503))
+        }
+        return Promise.resolve(jsonResponse(session({ status: 'active' })))
+      }
+      if (url.includes('/participants')) return Promise.resolve(jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }))
+      if (url.includes('/queue')) return Promise.resolve(jsonResponse({ current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)], waiting: [queueItem('pc', USER_C.id)], is_paused: false }))
+      if (url.includes('/matches/current')) return Promise.resolve(jsonResponse(match()))
+      if (url.includes('/matches')) return Promise.resolve(jsonResponse({ items: [], total: 0, limit: 100, offset: 0 }))
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+    const { client } = renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+    expect(await screen.findByRole('heading', { name: 'Тестовая игра' })).toBeInTheDocument()
+
+    failDetail = true
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: sessionKeys.detail(SESSION_ID) })
+    })
+
+    expect(screen.getByRole('heading', { name: 'Тестовая игра' })).toBeInTheDocument()
+    expect(screen.queryByText('Не удалось загрузить данные')).not.toBeInTheDocument()
   })
 
   it('opens the skip modal and refreshes the current pair after success', async () => {
@@ -336,8 +652,8 @@ function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-function user(id: string, firstName: string) {
-  return { id, first_name: firstName, last_name: null, username: firstName.toLowerCase(), photo_url: null, created_at: '2026-11-07T10:00:00Z', last_active_at: null }
+function user(id: string, firstName: string, lastName: string | null = null) {
+  return { id, first_name: firstName, last_name: lastName, username: firstName.toLowerCase(), photo_url: null, created_at: '2026-11-07T10:00:00Z', last_active_at: null }
 }
 
 function participant(id: string, profile: ReturnType<typeof user>): SessionParticipant {

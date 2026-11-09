@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr = SecretStr("")
     jwt_algorithm: Literal["HS256"] = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=60, ge=1)
+    websocket_ticket_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    websocket_heartbeat_interval_seconds: int = Field(default=25, ge=1, le=120)
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_init_data_max_age_seconds: int = Field(default=300, ge=1)
     dev_user_id: UUID = UUID("00000000-0000-4000-8000-000000000001")
