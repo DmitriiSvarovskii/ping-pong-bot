@@ -32,6 +32,10 @@ export function PaddleIcon(props: IconProps) {
   return <svg {...baseProps} {...props}><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 5.5 5.5M18 5h.01"/></svg>
 }
 
+export function RatingIcon(props: IconProps) {
+  return <svg {...baseProps} {...props}><path d="M5 20v-6h4v6M10 20V9h4v11M15 20V4h4v16"/><path d="M3 20h18"/></svg>
+}
+
 export function ChevronIcon(props: IconProps) {
   return <svg {...baseProps} {...props}><path d="m9 18 6-6-6-6"/></svg>
 }

@@ -4,9 +4,9 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useRouteScrollRestoration } from '../hooks/useRouteScrollRestoration'
 import { useTelegramBackButton } from '../hooks/useTelegramBackButton'
 import { AppUpdateBanner } from './AppUpdateBanner'
-import { HomeIcon, PaddleIcon, UserIcon } from './icons'
+import { HomeIcon, PaddleIcon, RatingIcon, UserIcon } from './icons'
 
-const ROOT_ROUTES = new Set(['/', '/games', '/profile'])
+const ROOT_ROUTES = new Set(['/', '/games', '/rating', '/profile'])
 
 export function AppShell() {
   const location = useLocation()
@@ -33,6 +33,7 @@ export function AppShell() {
       <nav className="bottom-nav" aria-label="Основная навигация">
         <NavItem to="/" label="Главная" icon={<HomeIcon />} />
         <NavItem to="/games" label="Игры" icon={<PaddleIcon />} />
+        <NavItem to="/rating" label="Рейтинг" icon={<RatingIcon />} />
         <NavItem to="/profile" label="Профиль" icon={<UserIcon />} />
       </nav>
     </div>

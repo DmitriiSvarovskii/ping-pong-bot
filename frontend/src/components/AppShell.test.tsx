@@ -35,7 +35,7 @@ afterEach(() => {
   window.history.replaceState(null, '', '/')
 })
 
-it.each(['/', '/games', '/profile'])('hides Telegram Back Button on root route %s', (path) => {
+it.each(['/', '/games', '/rating', '/profile'])('hides Telegram Back Button on root route %s', (path) => {
   const bridge = telegramBridge()
   window.Telegram = { WebApp: bridge.webApp }
   window.history.replaceState(null, '', path)
@@ -99,6 +99,18 @@ it('does not push a duplicate history entry for the selected root tab', async ()
   expect(historyIndex()).toBe(0)
 })
 
+it('opens Rating as a root tab without enabling Telegram Back Button', async () => {
+  const bridge = telegramBridge()
+  window.Telegram = { WebApp: bridge.webApp }
+  renderNavigation()
+
+  await userEvent.click(screen.getByRole('link', { name: 'Рейтинг' }))
+
+  expect(await screen.findByText('Rating')).toBeInTheDocument()
+  expect(window.location.pathname).toBe('/rating')
+  expect(bridge.show).not.toHaveBeenCalled()
+})
+
 function renderNavigation() {
   return render(
     <BrowserRouter>
@@ -106,6 +118,7 @@ function renderNavigation() {
         <Route element={<AppShell />}>
           <Route path="/" element={<Root label="Home" />} />
           <Route path="/profile" element={<Root label="Profile" />} />
+          <Route path="/rating" element={<Root label="Rating" />} />
           <Route path="/games" element={<Games />} />
           <Route path="/games/:sessionId" element={<Root label="Session" />} />
         </Route>
