@@ -10,6 +10,7 @@ from pingstats.modules.matches.application.dto import MatchView
 from pingstats.modules.matches.domain import (
     MatchContext,
     MatchResultRevision,
+    MatchRevisionOperation,
     MatchStatus,
     ResultSnapshot,
     SetScore,
@@ -44,6 +45,11 @@ class FullResultRequest(BaseModel):
 
 
 class CorrectResultRequest(FullResultRequest):
+    expected_version: Annotated[StrictInt, Field(ge=1)]
+    reason: Annotated[str | None, Field(max_length=1000)] = None
+
+
+class VoidMatchRequest(BaseModel):
     expected_version: Annotated[StrictInt, Field(ge=1)]
     reason: Annotated[str | None, Field(max_length=1000)] = None
 
@@ -128,7 +134,10 @@ class MatchListResponse(BaseModel):
 
 class ResultSnapshotResponse(BaseModel):
     sets: list[SetScoreInput]
-    winner_id: UUID
+    winner_id: UUID | None
+    status: MatchStatus | None
+    completed_at: datetime | None
+    match_version: int | None
 
     @classmethod
     def from_domain(cls, snapshot: ResultSnapshot) -> "ResultSnapshotResponse":
@@ -141,6 +150,9 @@ class ResultSnapshotResponse(BaseModel):
                 for item in snapshot.sets
             ],
             winner_id=snapshot.winner_id,
+            status=snapshot.status,
+            completed_at=snapshot.completed_at,
+            match_version=snapshot.match_version,
         )
 
 
@@ -152,6 +164,7 @@ class MatchRevisionResponse(BaseModel):
     new_result: ResultSnapshotResponse
     reason: str | None
     created_at: datetime
+    operation: MatchRevisionOperation | None
 
     @classmethod
     def from_domain(cls, revision: MatchResultRevision) -> "MatchRevisionResponse":
@@ -163,6 +176,7 @@ class MatchRevisionResponse(BaseModel):
             new_result=ResultSnapshotResponse.from_domain(revision.new_result),
             reason=revision.reason,
             created_at=revision.created_at,
+            operation=revision.operation,
         )
 
 

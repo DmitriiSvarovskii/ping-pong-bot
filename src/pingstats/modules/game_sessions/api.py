@@ -42,6 +42,7 @@ from pingstats.modules.game_sessions.realtime import (
 )
 from pingstats.modules.game_sessions.schemas import (
     CurrentSessionMatchRequest,
+    SessionCorrectResultRequest,
     SessionCreateRequest,
     SessionListResponse,
     SessionMatchCommandResponse,
@@ -56,6 +57,7 @@ from pingstats.modules.game_sessions.schemas import (
     SessionSetRequest,
     SessionSkipRequest,
     SessionStatisticsResponse,
+    SessionVoidMatchRequest,
     WebSocketTicketResponse,
 )
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
@@ -377,6 +379,51 @@ async def list_session_matches(
         limit=limit,
         offset=offset,
     )
+
+
+@game_sessions_router.patch(
+    "/{session_id}/matches/{match_id}/results", response_model=SessionMatchResponse
+)
+async def correct_session_match_result(
+    session_id: UUID,
+    match_id: UUID,
+    payload: SessionCorrectResultRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
+    service: Annotated[GameSessionService, Depends(get_game_session_service)],
+) -> SessionMatchResponse:
+    view, _ = await service.correct_session_match(
+        uow,
+        actor_id=current_user.id,
+        session_id=session_id,
+        match_id=match_id,
+        scores=[item.to_domain() for item in payload.sets],
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+    )
+    return SessionMatchResponse.from_view(view)
+
+
+@game_sessions_router.post(
+    "/{session_id}/matches/{match_id}/void", response_model=SessionMatchResponse
+)
+async def void_session_match(
+    session_id: UUID,
+    match_id: UUID,
+    payload: SessionVoidMatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
+    service: Annotated[GameSessionService, Depends(get_game_session_service)],
+) -> SessionMatchResponse:
+    view, _ = await service.void_session_match(
+        uow,
+        actor_id=current_user.id,
+        session_id=session_id,
+        match_id=match_id,
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+    )
+    return SessionMatchResponse.from_view(view)
 
 
 @game_sessions_router.get("/{session_id}/statistics", response_model=SessionStatisticsResponse)

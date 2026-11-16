@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pingstats.infrastructure.database.engine import Database
@@ -18,8 +18,10 @@ def get_match_repository(
     return SqlAlchemyMatchRepository(session)
 
 
-def get_match_service() -> MatchService:
-    return MatchService()
+def get_match_service(request: Request) -> MatchService:
+    return MatchService(
+        rating_rebuild_notifier=request.app.state.rating_scheduler_wakeup,
+    )
 
 
 def get_matches_uow(

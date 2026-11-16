@@ -305,6 +305,14 @@ async def test_all_game_session_routes_require_jwt() -> None:
             await client.get(f"/api/v1/game-sessions/{session_id}/matches"),
             await client.get(f"/api/v1/game-sessions/{session_id}/statistics"),
             await client.get(f"/api/v1/game-sessions/{session_id}/matches/current"),
+            await client.patch(
+                f"/api/v1/game-sessions/{session_id}/matches/{match_id}/results",
+                json={"sets": [score], "expected_version": 2},
+            ),
+            await client.post(
+                f"/api/v1/game-sessions/{session_id}/matches/{match_id}/void",
+                json={"expected_version": 2},
+            ),
             await client.post(
                 f"/api/v1/game-sessions/{session_id}/matches/current/sets", json=score
             ),
@@ -541,6 +549,8 @@ def test_openapi_contains_all_game_session_routes_and_schemas() -> None:
         "/api/v1/game-sessions/{session_id}/matches/current/cancel",
         "/api/v1/game-sessions/{session_id}/matches/current/cancel-and-leave",
         "/api/v1/game-sessions/{session_id}/matches/current/skip",
+        "/api/v1/game-sessions/{session_id}/matches/{match_id}/results",
+        "/api/v1/game-sessions/{session_id}/matches/{match_id}/void",
     } <= paths
     assert {
         "SessionCreateRequest",

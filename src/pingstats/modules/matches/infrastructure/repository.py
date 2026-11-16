@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pingstats.modules.matches.application.dto import MatchView
@@ -13,6 +13,7 @@ from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
     MatchResultRevision,
+    MatchRevisionOperation,
     MatchStatus,
     ResultSnapshot,
     SetScore,
@@ -176,6 +177,96 @@ class SqlAlchemyMatchRepository:
                 for participant, user in participant_rows
             ),
             sets=tuple(item.to_domain() for item in sets),
+        )
+
+    async def list_for_rating_backfill(
+        self,
+        *,
+        after_completed_at: datetime | None,
+        after_match_id: UUID | None,
+        completed_from: datetime | None,
+        completed_before: datetime | None,
+        limit: int,
+    ) -> Sequence[tuple[MatchView, UUID | None]]:
+        """Load a chronological batch and its latest result revision without N+1."""
+        filters = [MatchModel.completed_at.is_not(None)]
+        if completed_from is not None:
+            filters.append(MatchModel.completed_at >= completed_from)
+        if completed_before is not None:
+            filters.append(MatchModel.completed_at < completed_before)
+        if after_completed_at is not None:
+            if after_match_id is None:
+                raise ValueError("Backfill cursor match ID is required with completed_at")
+            filters.append(
+                or_(
+                    MatchModel.completed_at > after_completed_at,
+                    and_(
+                        MatchModel.completed_at == after_completed_at,
+                        MatchModel.id > after_match_id,
+                    ),
+                )
+            )
+        models = (
+            await self._session.scalars(
+                select(MatchModel)
+                .where(*filters)
+                .order_by(MatchModel.completed_at, MatchModel.id)
+                .limit(limit)
+            )
+        ).all()
+        if not models:
+            return ()
+
+        match_ids = tuple(model.id for model in models)
+        participant_rows = (
+            await self._session.execute(
+                select(MatchParticipantModel, UserModel)
+                .join(UserModel, UserModel.id == MatchParticipantModel.user_id)
+                .where(MatchParticipantModel.match_id.in_(match_ids))
+                .order_by(MatchParticipantModel.match_id, MatchParticipantModel.position)
+            )
+        ).all()
+        set_models = (
+            await self._session.scalars(
+                select(MatchSetModel)
+                .where(MatchSetModel.match_id.in_(match_ids))
+                .order_by(MatchSetModel.match_id, MatchSetModel.set_number)
+            )
+        ).all()
+        revision_rows = (
+            await self._session.execute(
+                select(
+                    MatchResultRevisionModel.match_id,
+                    MatchResultRevisionModel.id,
+                )
+                .where(MatchResultRevisionModel.match_id.in_(match_ids))
+                .order_by(
+                    MatchResultRevisionModel.match_id,
+                    MatchResultRevisionModel.revision_number.desc(),
+                )
+            )
+        ).all()
+        participants_by_match: dict[UUID, list] = defaultdict(list)
+        sets_by_match: dict[UUID, list] = defaultdict(list)
+        latest_revision_by_match: dict[UUID, UUID] = {}
+        for participant, user in participant_rows:
+            participants_by_match[participant.match_id].append(
+                (participant.to_domain(), user.to_domain())
+            )
+        for item in set_models:
+            sets_by_match[item.match_id].append(item.to_domain())
+        for match_id, revision_id in revision_rows:
+            latest_revision_by_match.setdefault(match_id, revision_id)
+        return tuple(
+            (
+                MatchView(
+                    match=model.to_domain(),
+                    participants=tuple(participants_by_match[model.id]),
+                    sets=tuple(sets_by_match[model.id]),
+                ),
+                latest_revision_by_match.get(model.id),
+            )
+            for model in models
         )
 
     async def list_for_user(
@@ -352,6 +443,27 @@ class SqlAlchemyMatchRepository:
         )
         await self._session.flush()
 
+    async def void_completed_match(self, match: Match) -> Match:
+        statement = (
+            update(MatchModel)
+            .where(
+                MatchModel.id == match.id,
+                MatchModel.version == match.version,
+                MatchModel.status == MatchStatus.COMPLETED,
+            )
+            .values(
+                status=MatchStatus.VOIDED,
+                winner_id=None,
+                updated_at=func.now(),
+                version=match.version + 1,
+            )
+            .returning(MatchModel)
+        )
+        model = (await self._session.scalars(statement)).one_or_none()
+        if model is None:
+            raise RuntimeError("Optimistic match void failed while row was locked")
+        return model.to_domain()
+
     async def create_revision(
         self,
         *,
@@ -360,6 +472,7 @@ class SqlAlchemyMatchRepository:
         previous_result: ResultSnapshot,
         new_result: ResultSnapshot,
         reason: str | None,
+        operation: MatchRevisionOperation,
     ) -> MatchResultRevision:
         current = await self._session.scalar(
             select(func.max(MatchResultRevisionModel.revision_number)).where(
@@ -374,6 +487,7 @@ class SqlAlchemyMatchRepository:
             previous_result=previous_result.to_json(),
             new_result=new_result.to_json(),
             reason=reason,
+            operation=operation,
         )
         self._session.add(model)
         await self._session.flush()

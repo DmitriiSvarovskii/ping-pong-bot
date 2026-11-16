@@ -1,5 +1,6 @@
 """Standalone match application lifecycle tests."""
 
+from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -21,12 +22,14 @@ from pingstats.modules.matches.domain import (
     MatchContext,
     MatchParticipant,
     MatchResultRevision,
+    MatchRevisionOperation,
     MatchSet,
     MatchStatus,
     ResultSnapshot,
     SetScore,
 )
 from pingstats.modules.users.domain import User
+from tests.unit.rating_fakes import FakeRatingInputRepository, FakeRatingPeriodRepository
 
 
 def make_user(user_id: UUID, name: str) -> User:
@@ -39,6 +42,8 @@ class FakeMatchRepository:
         self.users = users
         self.views: dict[UUID, MatchView] = {}
         self.revisions: dict[UUID, list[MatchResultRevision]] = {}
+        self.rating_periods = FakeRatingPeriodRepository()
+        self.rating_inputs = FakeRatingInputRepository()
 
     async def lock_user_pair(self, first_id: UUID, second_id: UUID) -> set[UUID]:
         return {item for item in (first_id, second_id) if item in self.users}
@@ -140,6 +145,17 @@ class FakeMatchRepository:
             ),
         )
 
+    async def void_completed_match(self, match: Match) -> Match:
+        updated = replace(
+            match,
+            status=MatchStatus.VOIDED,
+            winner_id=None,
+            updated_at=datetime.now(UTC),
+            version=match.version + 1,
+        )
+        self.views[match.id] = replace(self.views[match.id], match=updated)
+        return updated
+
     async def create_revision(
         self,
         *,
@@ -148,6 +164,7 @@ class FakeMatchRepository:
         previous_result: ResultSnapshot,
         new_result: ResultSnapshot,
         reason: str | None,
+        operation: MatchRevisionOperation,
     ) -> MatchResultRevision:
         revisions = self.revisions.setdefault(match_id, [])
         revision = MatchResultRevision(
@@ -159,6 +176,7 @@ class FakeMatchRepository:
             new_result,
             reason,
             datetime.now(UTC),
+            operation,
         )
         revisions.append(revision)
         return revision
@@ -167,6 +185,12 @@ class FakeMatchRepository:
 class FakeUow:
     def __init__(self, repository: FakeMatchRepository) -> None:
         self.matches = repository
+        self.rating_periods = repository.rating_periods
+        self.rating_inputs = repository.rating_inputs
+        self.rating_recalculations = object()
+        self.rating_rebuild_jobs = object()
+        self.rating_rebuild_periods = object()
+        self.after_commit: dict[Hashable, Callable[[], Awaitable[None]]] = {}
 
     async def __aenter__(self):
         return self
@@ -180,10 +204,26 @@ class FakeUow:
         del exc_type, exc_value, traceback
 
     async def commit(self) -> None:
-        pass
+        callbacks = tuple(self.after_commit.values())
+        self.after_commit.clear()
+        for callback in callbacks:
+            await callback()
 
     async def rollback(self) -> None:
-        pass
+        self.after_commit.clear()
+
+    def add_after_commit(self, key: Hashable, callback: Callable[[], Awaitable[None]]) -> None:
+        self.after_commit.setdefault(key, callback)
+
+
+class RecordingRatingCorrectionCoordinator:
+    def __init__(self, *, creates_rebuild: bool = False) -> None:
+        self.calls = []
+        self.creates_rebuild = creates_rebuild
+
+    async def coordinate(self, **kwargs) -> bool:
+        self.calls.append(kwargs)
+        return self.creates_rebuild
 
 
 @pytest.fixture
@@ -197,11 +237,33 @@ def setup() -> tuple[MatchService, FakeMatchRepository, UUID, UUID, UUID]:
     return MatchService(), FakeMatchRepository(users), creator, invited, outsider
 
 
+def test_legacy_revision_snapshot_remains_readable_without_inferred_fields() -> None:
+    winner_id = uuid4()
+    snapshot = ResultSnapshot.from_json(
+        {
+            "sets": [{"set_number": 1, "player1_score": 11, "player2_score": 5}],
+            "winner_id": str(winner_id),
+        }
+    )
+    assert snapshot.winner_id == winner_id
+    assert snapshot.status is None
+    assert snapshot.completed_at is None
+    assert snapshot.match_version is None
+
+
 async def active_match(
-    service: MatchService, repository: FakeMatchRepository, creator: UUID, invited: UUID
+    service: MatchService,
+    repository: FakeMatchRepository,
+    creator: UUID,
+    invited: UUID,
+    *,
+    is_ranked: bool = False,
 ) -> MatchView:
     pending = await service.create_standalone(
-        FakeUow(repository), creator_id=creator, invited_user_id=invited
+        FakeUow(repository),
+        creator_id=creator,
+        invited_user_id=invited,
+        is_ranked=is_ranked,
     )
     return await service.accept(FakeUow(repository), actor_id=invited, match_id=pending.match.id)
 
@@ -325,9 +387,18 @@ async def test_correction_audit_permissions_and_window(setup) -> None:
             expected_version=completed.match.version,
             reason=None,
         )
+    with pytest.raises(MatchPermissionError):
+        await service.correct_result(
+            FakeUow(repository),
+            actor_id=invited,
+            match_id=completed.match.id,
+            scores=corrected_scores,
+            expected_version=completed.match.version,
+            reason="score fixed",
+        )
     corrected, revision = await service.correct_result(
         FakeUow(repository),
-        actor_id=invited,
+        actor_id=creator,
         match_id=completed.match.id,
         scores=corrected_scores,
         expected_version=completed.match.version,
@@ -337,6 +408,9 @@ async def test_correction_audit_permissions_and_window(setup) -> None:
     assert revision.previous_result.winner_id == creator
     assert revision.new_result.winner_id == invited
     assert revision.reason == "score fixed"
+    assert revision.operation is MatchRevisionOperation.CORRECTION
+    assert revision.previous_result.completed_at == completed.match.completed_at
+    assert revision.new_result.match_version == corrected.match.version
 
     with pytest.raises(CorrectionWindowExpiredError):
         await service.correct_result(
@@ -348,6 +422,106 @@ async def test_correction_audit_permissions_and_window(setup) -> None:
             reason=None,
             now=completed.match.completed_at + timedelta(hours=24, microseconds=1),
         )
+
+
+async def test_creator_can_void_completed_match_without_time_limit(setup) -> None:
+    service, repository, creator, invited, _ = setup
+    active = await active_match(service, repository, creator, invited)
+    completed = await service.record_full_result(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 3), SetScore(11, 4), SetScore(11, 5)],
+    )
+    voided, revision = await service.void_match(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=completed.match.id,
+        expected_version=completed.match.version,
+        reason="duplicate",
+    )
+    assert voided.match.status is MatchStatus.VOIDED
+    assert voided.match.winner_id is None
+    assert voided.match.completed_at == completed.match.completed_at
+    assert len(voided.sets) == 3
+    assert revision.operation is MatchRevisionOperation.VOID
+    assert revision.previous_result.winner_id == creator
+    assert revision.new_result.winner_id is None
+    with pytest.raises(MatchStateError):
+        await service.void_match(
+            FakeUow(repository),
+            actor_id=creator,
+            match_id=completed.match.id,
+            expected_version=voided.match.version,
+            reason=None,
+        )
+
+
+async def test_standalone_organizer_need_not_be_a_participant_to_correct(setup) -> None:
+    service, repository, creator, invited, organizer = setup
+    active = await active_match(service, repository, creator, invited)
+    completed = await service.record_full_result(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 3), SetScore(11, 4), SetScore(11, 5)],
+    )
+    repository.views[completed.match.id] = replace(
+        completed, match=replace(completed.match, created_by=organizer)
+    )
+    corrected, _ = await service.correct_result(
+        FakeUow(repository),
+        actor_id=organizer,
+        match_id=completed.match.id,
+        scores=[SetScore(3, 11), SetScore(4, 11), SetScore(5, 11)],
+        expected_version=completed.match.version,
+        reason=None,
+    )
+    assert corrected.match.winner_id == invited
+
+
+async def test_rated_match_changes_use_atomic_correction_coordinator(setup) -> None:
+    _, repository, creator, invited, _ = setup
+    coordinator = RecordingRatingCorrectionCoordinator(creates_rebuild=True)
+
+    class Notifier:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def notify(self) -> None:
+            self.calls += 1
+
+    notifier = Notifier()
+    service = MatchService(
+        rating_correction_coordinator=coordinator,
+        rating_rebuild_notifier=notifier,
+    )
+    active = await active_match(service, repository, creator, invited, is_ranked=True)
+    completed = await service.record_full_result(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 3), SetScore(11, 4), SetScore(11, 5)],
+    )
+    corrected, _ = await service.correct_result(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=completed.match.id,
+        scores=[SetScore(3, 11), SetScore(4, 11), SetScore(5, 11)],
+        expected_version=completed.match.version,
+        reason=None,
+    )
+    voided, _ = await service.void_match(
+        FakeUow(repository),
+        actor_id=creator,
+        match_id=completed.match.id,
+        expected_version=corrected.match.version,
+        reason=None,
+    )
+    assert voided.match.status is MatchStatus.VOIDED
+    assert len(coordinator.calls) == 2
+    assert all(call["match"].match.is_ranked for call in coordinator.calls)
+    assert notifier.calls == 2
 
 
 async def test_standalone_commands_reject_session_matches(setup) -> None:

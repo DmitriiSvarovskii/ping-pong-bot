@@ -19,6 +19,13 @@ from pingstats.modules.game_sessions.domain import (
     GameSessionStatus,
 )
 from pingstats.modules.matches.application.ports import MatchRepository
+from pingstats.modules.ratings.application.ports import (
+    RatingInputRepository,
+    RatingPeriodRepository,
+    RatingRebuildJobRepository,
+    RatingRebuildPeriodRepository,
+    RatingRecalculationRepository,
+)
 from pingstats.modules.users.domain import User
 
 
@@ -119,6 +126,11 @@ class GameSessionsUnitOfWork(Protocol):
     game_sessions: GameSessionRepository
     current_matches: CurrentSessionMatchChecker
     matches: MatchRepository
+    rating_periods: RatingPeriodRepository
+    rating_inputs: RatingInputRepository
+    rating_recalculations: RatingRecalculationRepository
+    rating_rebuild_jobs: RatingRebuildJobRepository
+    rating_rebuild_periods: RatingRebuildPeriodRepository
 
     async def __aenter__(self) -> "GameSessionsUnitOfWork": ...
 

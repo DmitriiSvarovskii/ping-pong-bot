@@ -26,6 +26,15 @@ from pingstats.modules.matches.infrastructure.models import (  # noqa: F401
     MatchResultRevisionModel,
     MatchSetModel,
 )
+from pingstats.modules.ratings.infrastructure.models import (  # noqa: F401
+    RatingModel,
+    RatingPeriodMatchInputModel,
+    RatingPeriodModel,
+    RatingPeriodResultModel,
+    RatingRebuildJobModel,
+    RatingRebuildPeriodModel,
+    RatingRecalculationRequestModel,
+)
 from pingstats.modules.users.infrastructure.models import UserModel  # noqa: F401
 
 config = context.config

@@ -75,10 +75,10 @@ server-state профиля, React Router — навигацией, UI не во
 | `friendships` | заявки и симметричные связи | `Send/Accept/Reject/CancelRequest`, `RemoveFriend` |
 | `matches` | единая модель 1×1, приглашение, правила счёта, ревизии | `MatchService`, `MatchResultWriter`, `ScoreValidator` |
 | `game_sessions` | жизненный цикл, состав, очередь, session matches, последовательность, ротация | `GameSessionService`, `LoserRotatesStrategy` |
-| `ratings` | Glicko-2, UTC-периоды, catch-up и пересчёт | `CloseDueRatingPeriods`, `RecalculateRatings`, `Glicko2Strategy` |
+| `ratings` | Glicko-2, UTC-периоды, catch-up и пересчёт | `RatingPeriodCloser`, `RecalculateRatings`, `Glicko2Strategy` |
 | `tournaments` | регистрация, rating seeding, сетка, walkover и продвижение | `Create/Join/StartTournament`, `RecordWalkover`, `AdvanceBracket`, `BracketStrategy` |
 | `statistics` | перестраиваемые player/H2H projections | `ProjectMatchResult`, `RebuildStatistics`, queries |
-| `leaderboard` | ранжированное чтение рейтинга | `GetLeaderboard` |
+| `leaderboard` | ранжированное чтение рейтинга | `LeaderboardService` |
 | `notifications` | outbox, предпочтения, доставка | `EnqueueNotification`, dispatcher |
 
 `matches` владеет правилами счёта. `game_sessions` и `tournaments` вызывают `RecordResult` внутри общего UoW и реагируют на доменное событие `MatchResultRecorded`; собственных validators партий у них нет.
@@ -105,7 +105,10 @@ transactional outbox для гарантированной доставки до
   этот порядок используется для результата, отмены, завершения, join/leave и выдачи sequence;
   partial unique indexes запрещают два активных участия пользователя и два active-матча одной сессии;
 - запуск/продвижение турнира: `tournaments`/целевой bracket node;
-- закрытие рейтингового периода: PostgreSQL advisory lock плюс блокировка периода с уникальной published calculation version.
+- intake и закрытие рейтингового периода используют один PostgreSQL transaction-level advisory
+  lock по UTC-дню; после него intake блокирует строку периода и пишет только в `open`, а closer под
+  тем же lock переводит период в `calculating`. Уникальные interval/input keys и
+  calculation version дополняют сериализацию на уровне БД.
 
 Для UI-редактирования агрегаты имеют `version` (optimistic lock). Deadlock предотвращается стабильным порядком UUID.
 
@@ -121,22 +124,26 @@ stateDiagram-v2
   active --> completed: decisive valid set/result
   active --> cancelled: unplayed cancellation
   completed --> completed: audited correction
+  completed --> voided: audited organizer void
 ```
 
 `MatchService` проверяет автора, роль, статус и версию под блокировкой строки матча.
 `ScoreValidator` единообразно валидирует партии и серию для пошаговой и полной записи.
 Текущий итог нормализован в `match_sets`; `winner_id` всегда вычисляет сервер. Первоначальная
-запись не создаёт audit revision; каждое исправление атомарно пишет полные previous/new JSONB-снимки
-в `match_result_revisions` и заменяет current sets. Политика standalone: участник может исправлять до
-`completed_at + 24h`. Причина необязательна, автор/время/оба снимка обязательны.
+запись не создаёт audit revision; каждое исправление атомарно пишет previous/new JSONB-снимки
+в `match_result_revisions` и заменяет current sets. Standalone correction разрешён только
+`created_by` до `completed_at + 24h`; число corrections не ограничено, участники и `completed_at`
+immutable. Session correction выполняет только organizer без срока. Причина необязательна,
+автор/время/тип операции/оба снимка обязательны для новых revisions.
 
-PS-006 не создаёт outbox и не обновляет rating/statistics: `match_sets`, `winner_id`, `completed_at`
-и журнал revisions являются точкой интеграции будущих модулей. В PS-007.4 общая запись результата
-вынесена в `MatchResultWriter`: standalone- и session-orchestrators используют один `ScoreValidator`,
-одну модель sets и одно определение победителя. Writer не открывает UoW, не блокирует строки и не
-выполняет commit. Прямые cancel/result/correction-команды `MatchService` принимают только
-`standalone`; session match изменяется только контекстным workflow. Безопасное исправление session
-result с учётом последующей истории остаётся отдельной задачей.
+Общая запись результата вынесена в `MatchResultWriter`: standalone- и session-orchestrators
+используют один `ScoreValidator`, одну модель sets и одно определение победителя. Writer не открывает
+UoW, не блокирует строки и не выполняет commit. После перехода ranked match в `completed`, но до
+единственного `uow.commit()`, orchestrator вызывает `RatingMatchInputRecorder` через rating-
+репозитории той же `AsyncSession`. Поэтому результат, session rotation и rating input либо
+фиксируются вместе, либо вместе откатываются. Прямые cancel/result/correction-команды
+`MatchService` принимают только `standalone`; session match изменяется только контекстным workflow.
+Corrections и их rating rebuild остаются отдельным этапом.
 
 ## 7. Свободная сессия и ротация
 
@@ -297,9 +304,250 @@ Downstream match после исправления не удаляется. Ес
 
 `RatingStrategy.calculate(player_state, opponents, params)` — чистый детерминированный порт. Адаптер Glicko-2 конвертирует rating/RD в шкалу Glicko-2, вычисляет `v`, `delta`, новую volatility итерационным алгоритмом, затем `phi*`, `phi'`, `mu'` и обратное преобразование. Defaults — 1500/350/0.06 и `tau=0.5`, но все параметры приходят из validated settings и сохраняются со снимком расчёта. Draw технически поддерживается стратегией, хотя текущий матч ничьи запрещает.
 
-Период — календарный интервал `[00:00, 00:00)` UTC. In-process scheduler стартует из FastAPI lifespan, при запуске и затем до ближайшей UTC-границы вызывает общий `CloseDueRatingPeriods`. Use case под PostgreSQL advisory lock создаёт отсутствующие периоды и закрывает их строго по порядку; поэтому рестарт и пропущенные дни безопасны. Development-only ручной endpoint вызывает тот же use case. Статус, уникальный интервал и `calculation_version` дают идемпотентность и защиту от повторной публикации; Celery/Redis не нужны.
+Период — календарный интервал `[00:00, 00:00)` UTC и становится доступен для закрытия через пять
+минут после конца, то есть в `00:05 UTC`. `RatingPeriodCloser` выбирает все сохранённые просроченные
+`open` periods в хронологическом порядке и по одному переводит их в `calculating`. В PS-012.5 этот
+статус означает запечатанную immutable input boundary; числовой расчёт и `published` не выполняются.
+Повторный вызов видит non-open status и ничего не меняет.
+
+Лёгкий in-process `RatingPeriodScheduler` принадлежит FastAPI lifespan. Он запускает rating
+maintenance сразу после старта, а затем просыпается по локальному post-commit signal либо не реже
+чем раз в 30 секунд для межпроцессного обнаружения rebuild jobs. В каждом цикле
+`RatingRebuildOrchestrator` выполняется раньше normal `RatingWorkflowOrchestrator`; после cutover
+обычный catch-up запускается немедленно. Суточное закрытие по-прежнему определяется `00:05 UTC`.
+Инфраструктурные ошибки получают три ограниченных backoff retry, затем пяти минутный degraded
+interval; business conflict переводит rebuild в durable `failed` без автоматического retry. На
+shutdown task отменяется и ожидается. Каждый Uvicorn worker может запустить scheduler, но
+дублирование исключено advisory locks, row locks и идемпотентностью этапов; отдельный leader service,
+Celery и Redis не нужны. Scheduler отключён в testing.
 
 Период закрывается из immutable input rows. Сначала рассчитываются все игроки из состояния на начало периода, затем результаты атомарно публикуются. Неактивные получают только рост RD. Сыгранные результаты и win/loss projections записываются немедленно, rating — только при publish. Correction помечает цепочку периодов stale; rebuild начинает с предыдущего valid period.
+
+`RatingPeriodCalculator` PS-012.6.1 выполняет чистую application-оркестрацию одного периода со
+статусом `calculating`, но ничего не сохраняет и не публикует. Он читает inputs текущей
+`calculation_version` и исходные состояния исключительно из `rating_period_results` ближайшего
+предыдущего сохранённого периода. Текущий `ratings` не используется: его snapshot может относиться к
+более поздней публикации. Если предыдущий период существует, но его полный result set отсутствует
+или его статус ещё не допускает историю, расчёт завершается controlled conflict; так более поздний
+период нельзя вычислить вне очереди.
+
+Для самого первого периода и нового участника применяется initial state из immutable parameter
+snapshot текущего периода. Все матчи игрока преобразуются в один список opponents, причём rating/RD
+каждого соперника берётся на начало того же периода; match order нормализуется и не создаёт
+последовательных rating updates. Полный набор игроков предыдущего результата переносится дальше:
+неактивные получают `games_count=0`, неизменные rating/volatility и Glicko-2 рост RD. Пользователь без
+rating history и без текущего input не материализуется.
+
+Calculation возвращает deterministic application DTO без UUID и timestamps. В PS-012.6.2.1
+`RatingPeriodResultPersister` повторно использует calculator внутри того же UoW, берёт общий
+period advisory lock и строку периода `FOR UPDATE`, затем сохраняет весь упорядоченный snapshot в
+`rating_period_results` и устанавливает `rating_periods.calculated_version` одним commit. Маркер
+равен `calculation_version` только после успешного сохранения всех строк; это также однозначно
+помечает завершённый пустой период, у которого result rows отсутствуют.
+
+Идемпотентный повтор пересчитывает deterministic DTO и сравнивает полный business snapshot с уже
+сохранённым. Точное совпадение является no-op, несовпадение или строки без completion marker дают
+controlled conflict и никогда не перезаписывают историю. Rollback удаляет и новые result rows, и
+маркер. На этом этапе `ratings`, status периода и `published_at` не меняются; публикация остаётся
+отдельной командой PS-012.6.2.2.
+
+`RatingPeriodPublisher` PS-012.6.2.2 не запускает Glicko-2: источником служит immutable snapshot
+`rating_period_results` версии, подтверждённой completion marker. Publisher под глобальным
+transaction-level publication advisory lock затем берёт обычный period lock и строку периода
+`FOR UPDATE`. Глобальный lock сериализует публикацию разных периодов, которые могут обновлять одни
+и те же строки `ratings`; period lock одновременно исключает гонку с persistence.
+
+До записи проверяются status/version/marker, ближайший предыдущий существующий период, отсутствие
+уже опубликованного более позднего периода, полнота active users относительно inputs и перенос всех
+пользователей предыдущего snapshot. Для существующего current rating его `as_of_period_id` и
+rating/RD/volatility обязаны совпасть с начальным состоянием result. Затем все current ratings,
+накопительный `rated_matches_count`, `status=published` и UTC `published_at` фиксируются одним commit.
+Ошибка откатывает весь набор. Повтор той же опубликованной версии возвращает период без commit и не
+меняет ratings или `published_at`; несовместимая версия/история является controlled conflict.
+
+`RatingWorkflowOrchestrator` PS-012.6.3 сначала вызывает closer, затем одним коротким read-UoW
+получает все `calculating` periods в порядке `starts_at`. Для каждого периода он перечитывает state:
+без актуального marker вызывает persister, с marker — publisher, после каждого отдельного commit
+снова читает период. Уже `published` пропускается. Ошибка раннего периода немедленно останавливает
+цикл, поэтому поздние периоды не рассчитываются и не публикуются. Успешные предыдущие транзакции не
+откатываются. Конкурентный worker, завершивший тот же этап первым, распознаётся по повторно прочитанным
+status/marker и считается нормальным прогрессом, а не повреждением.
+
+PS-012.10 добавляет внутренний `RatingHistoricalBackfill`. Он под global publication advisory lock
+keyset-сканирует матчи по `(completed_at, id)`, загружая match/participants/current sets/latest
+revision пакетно. В eligibility входят только `completed + ranked`; остальные строки с
+`completed_at` учитываются как skipped. Intake использует обычный `RatingMatchInputRecorder`, поэтому
+новые periods получают algorithm version `2`, UTC-границы, fingerprint и ссылку на актуальную
+revision. Все новые inputs одного запуска фиксируются одной транзакцией: конфликт в позднем матче
+откатывает и более ранние изменения.
+
+Перед intake проверяется persistent rebuild barrier. Lock order совпадает с correction/publisher:
+global publication → period advisory → period row. Отсутствующий период нельзя вставить перед уже
+published history; missing/mismatched input sealed периода даёт controlled conflict. Идентичный
+input любой стадии является idempotent skip. После commit `RatingWorkflowOrchestrator.run_periods`
+закрывает, рассчитывает и публикует только затронутые непустые периоды в хронологическом порядке;
+его обычные stages, completion markers и locks обеспечивают восстановление после прерывания.
+Dry-run проходит те же проверки и блокировки, но не записывает данные.
+Backfill не форсирует закрытие текущих UTC-суток: input сохраняется в `open` period, а
+calculator/publisher не запускаются до штатного close deadline. Явный integration test также
+фиксирует fail-closed поведение для отсутствующего периода перед уже published horizon.
+
+### 9.1 Corrections и rebuild
+
+С PS-012.7.5 correction разделён по policy: standalone исправляет только
+`matches.created_by` в течение 24 часов, session match — только organizer сессии без срока, включая
+completed session. `completed_at` и участники immutable. Session correction не запускает ротацию,
+не меняет очередь, пары, последующие матчи или status сессии. Match revision и rating correction
+revision создаётся в той же транзакции, что и mutation match. Общий application-компонент
+`MatchResultEditor` не зависит от delivery и переиспользуется standalone/session services.
+
+До первой publication `RatingCorrectionCoordinator` под publication/period locks назначает
+монотонно увеличенную `calculation_version`, копирует полный immutable input snapshot и заменяет в
+нём исправленный match либо исключает voided match; старые inputs/results остаются. Completion
+marker сбрасывается, поэтому обычный workflow пересчитывает период. Аннулированный completed match имеет
+отдельное доменное состояние `voided`, отличное от cancellation незавершённого матча, и отсутствовать
+в новом input snapshot. Void разрешён organizer без ограничения времени для standalone/session,
+включая completed session. Если исходный rating input отсутствует, coordinator выдаёт controlled
+conflict, а общая транзакция откатывает match mutation, revision и rating coordination.
+
+После publication coordinator создаёт persistent recalculation request и один активный
+`rating_rebuild_job`, фиксирует закрытый horizon существующих non-open periods и резервирует для
+каждого новую, никогда не переиспользуемую target version. Published snapshots и current ratings не
+изменяются. Новая correction переводит прежний active/failed job в `superseded`, переносит его
+незавершённые requests и создаёт новую ветку от самого раннего affected period.
+`published_version` продолжает указывать на пользовательскую ветку, пока новые монотонные shadow
+versions последовательно готовятся от самого раннего affected period. `rating_rebuild_periods`
+хранит per-period checkpoints. Horizon не включает open periods; intake новых матчей и closer
+продолжают работать. Persister и publisher проверяют persistent barrier после global publication
+lock и period row lock; workflow останавливает текущий проход без интенсивного retry. `failed` job
+удерживает barrier. Старые shadow snapshots остаются immutable.
+
+С PS-012.7.7 `RatingRebuildExecutor` последовательно обрабатывает checkpoints в хронологическом
+порядке. Для target version он перечитывает текущее состояние каждого source match, связывает input
+с последней revision, исключает `voided` и не меняет source snapshots. Первый shadow period берёт
+ближайшую предыдущую active `published_version`, каждый следующий — target results предыдущего
+checkpoint. Тот же calculator применяет Glicko-2 и calendar inactivity. Inputs, полный result
+snapshot, `calculated_version` и checkpoint `ready` фиксируются одной транзакцией на период; после
+готовности всех checkpoints job переходит в `ready`. Повторный запуск сравнивает immutable snapshots
+и продолжает с первого незавершённого checkpoint. Global publication/job/period locks защищают от
+параллельного executor и supersede. `ratings`, `published_version` и `published_at` до cutover не
+изменяются, а persistent barrier остаётся активным.
+
+Каждый shadow period имеет отдельную транзакцию подготовки inputs и сохранения results. С
+PS-012.7.8 `RatingRebuildCutover` под global publication lock блокирует job, periods хронологически
+и current ratings по UUID. До mutation он проверяет active job, полный ready horizon, target
+completion markers и отсутствие незакреплённых corrections. Одним commit сервис переключает
+`published_version`, восстанавливает cumulative `rated_matches_count` из versioned inputs,
+обновляет полный current snapshot, завершает requests/job и фиксирует cutover time. Игрок,
+потерявший после аннулирования всю rated history, удаляется из current `ratings`. Для ранее
+published periods первоначальный `published_at` сохраняется; ранее unpublished periods получают
+время первой публикации при cutover. Ошибка откатывает также промежуточный `activating`, поэтому
+старая ветка и barrier сохраняются. Повтор completed job идемпотентен. Redis, Celery и broker не
+используются.
+
+С PS-012.7.9 `RatingRebuildOrchestrator` автоматически восстанавливает `pending/preparing`, запускает
+cutover для `ready`, пропускает завершённые/superseded jobs и оставляет `failed` как persistent
+barrier. Expected application conflicts сохраняются как `failed` с `error_code`; инфраструктурные
+исключения остаются scheduler retry. Ручное восстановление выполняется внутренней командой
+`uv run python -m pingstats.modules.ratings.infrastructure.retry_rebuild <job_uuid>`: она переводит
+только активный failed job обратно в `preparing`, продолжает durable checkpoints и после cutover
+возобновляет normal workflow. Correction регистрирует process-local wake-up только after commit;
+если сигнал потерян или job создан другим worker, PostgreSQL discovery подхватывает его в следующем
+периодическом цикле.
+
+PS-012.7.10 подтверждает сквозной lifecycle corrections/rebuild: standalone и session revisions,
+неопубликованные versioned inputs, published shadow rebuild, supersede, atomic cutover, calendar
+inactivity, restart/manual recovery и последующее продолжение normal workflow. PostgreSQL
+concurrency suite проверяет сериализацию correction, intake, closer, persistence/publication,
+executor и cutover. Старые active snapshots доступны до commit cutover, а rollback/failed job не
+освобождает barrier.
+
+Calendar inactivity реализован в PS-012.7.3 и вычисляется по UTC-границам, а не по количеству period
+rows или времени запуска scheduler. `missing_periods = UTC-date(current.starts_at) -
+UTC-date(previous.ends_at)`. Calculator сначала строит внутренние working states ранее рейтингованных
+игроков после этих inactivity transitions, затем ровно один раз выполняет обычный расчёт текущего
+периода. Те же working states используются для соперников, поэтому результаты внутри периода остаются
+одновременными. Новый игрок получает initial state непосредственно в первом периоде участия.
+
+Persisted `rating_before`, `rd_before`, `volatility_before` остаются исходным состоянием предыдущего
+snapshot, а не промежуточным working state. Поэтому publisher продолжает сравнивать их с current
+`ratings`; `*_after` уже включает календарный gap и текущий period step. Algorithm version `1`
+сохраняет прежнюю sparse-семантику для воспроизводимости существующих snapshots, version `2`
+создаётся для новых periods и включает calendar inactivity. Пустые period/result rows не создаются,
+существующая история автоматически не пересчитывается. Domain-операция многошаговой inactivity
+переиспользуема shadow rebuild и будущим backfill.
+
+С PS-012.8 read-only `RatingQueryService` возвращает current rating и paginated history только из
+active published branch. Infrastructure query adapter соединяет `rating_period_results` с
+`rating_periods.published_version`; shadow snapshots исключены на уровне SQL. Перед чтением current
+state или страницы history adapter берёт transaction-level shared advisory publication lock, а
+cutover использует соответствующий exclusive lock. Поэтому один HTTP response видит целиком старую
+либо целиком новую ветку, но не промежуточное состояние atomic cutover.
+
+Stored `rd` остаётся воспроизводимым значением последнего опубликованного snapshot. Отдельное
+`effective_rd` вычисляется без записи тем же `Glicko2Strategy.advance_inactivity`: один шаг за каждую
+полностью завершённую UTC-сутки после `as_of_period_ends_at`, без текущих незавершённых суток.
+Response также содержит `inactivity_periods`, исходный `rd` и границу snapshot, поэтому projection
+не смешивается с published state. Игрок без истории не получает автоматически созданный rating.
+
+Модуль `leaderboard` является отдельным read model поверх публичного ratings application API.
+`SqlAlchemyLeaderboardRepository` под тем же shared publication lock строит оконную
+`row_number()` по rating DESC, RD ASC, rated matches DESC и UUID ASC. PostgreSQL выполняет
+ранжирование и offset/limit; page query сразу соединяет пользователя, current rating и его
+published period, поэтому N+1 отсутствует. Второй metadata query возвращает total и позицию
+авторизованного пользователя независимо от страницы. `LeaderboardService` переиспользует
+`RatingQueryService.project_current`, поэтому effective RD не имеет отдельной реализации.
+
+PS-012.7.4 добавляет durable rebuild infrastructure без запуска rebuild. `rating_periods` хранит
+три независимых указателя: `published_version` выбирает активную историю, `calculation_version`
+указывает готовящуюся версию, `calculated_version` подтверждает полный snapshot. Normal publisher
+устанавливает active version тем же commit, которым обновляет current ratings и status периода;
+calculator и publisher читают предыдущий опубликованный snapshot только через `published_version`.
+
+`rating_rebuild_jobs` хранит глобальный rebuild horizon и checkpoint состояния job. PostgreSQL
+partial unique index допускает только один job в `pending/preparing/ready/activating/failed`;
+`failed` намеренно продолжает удерживать persistent barrier. Только `completed` и `superseded`
+освобождают singleton. `rating_rebuild_periods` хранит ordered per-period checkpoint и уникальную
+пару `(period_id,target_version)`, поэтому shadow version нельзя повторно назначить другому job.
+Recalculation request имеет nullable current assignment `rebuild_job_id`; immutable match revision и
+старые jobs/checkpoints сохраняют аудит, но отдельная append-only история переназначений пока не
+создана. Репозитории читают barrier и блокируют job/checkpoint `FOR UPDATE`; normal persister и
+publisher применяют barrier, а scheduler автоматически продолжает rebuild до безопасного cutover.
+
+Порядок реализации утверждён с зависимостями: PS-012.7.3 Calendar Inactivity → PS-012.7.4 Rebuild
+Infrastructure → PS-012.7.5 Match Corrections → PS-012.7.6 Rebuild Coordination → PS-012.7.7 Shadow
+Calculation → PS-012.7.8 Atomic Cutover → PS-012.7.9 Rebuild Orchestration → PS-012.7.10 Integration
+& E2E. Порядок менять не требуется: математика и durable schema предшествуют producer corrections,
+coordination предшествует shadow writes, а orchestration начинается после безопасного cutover.
+
+`RatingMatchInputRecorder` регистрирует факт сразу при завершении standalone/session match. Eligibility:
+`status=completed`, `is_ranked=true`, два разных участника, winner среди них и непустой валидный
+результат; active, cancelled и unranked matches пропускаются. Период выбирается исключительно по
+aware `completed_at` как UTC-интервал `[00:00, 00:00)`. Recorder берёт общий period advisory lock,
+создаёт отсутствующий `open` period со snapshot параметров либо блокирует существующий `FOR UPDATE`,
+после чего сохраняет immutable input. В `calculating`, `published`, `stale` или `failed` период
+новый input не принимается.
+
+Closer использует тот же lock key и порядок `period advisory lock → rating_period FOR UPDATE`, что
+и intake. Если intake получил lock первым, его input фиксируется до запечатывания. Если closer
+получил lock первым, статус становится `calculating`, а ожидающий intake получает controlled conflict
+и вся match/session транзакция откатывается. Пять минут являются grace window для завершений около
+UTC-границы; решение всегда сравнивает timezone-aware значения после преобразования в UTC.
+
+Idempotency key в БД — `(period_id, calculation_version, match_id)`. Канонический SHA-256
+fingerprint включает идентификатор матча, упорядоченных участников и партий, winner и UTC
+`completed_at`. Повтор с теми же `source_match_version` и fingerprint является no-op; расхождение
+возвращает контролируемый conflict и не перезаписывает историю. Initial intake не создаёт отдельную
+транзакцию, after-commit callback или числовой rating.
+
+Persistence ratings реализован отдельным infrastructure adapter поверх общей `AsyncSession` и
+`SqlAlchemyUnitOfWork`. `RatingRepository` хранит только последний опубликованный snapshot,
+`RatingPeriodRepository` — UTC-периоды и optimistic versions, `RatingInputRepository` — immutable
+match snapshots для каждой calculation version, `RatingResultRepository` — period-level историю,
+`RatingRecalculationRepository` — идемпотентные requests от correction revision. Репозитории не
+открывают и не commit-ят собственные транзакции. Схема и репозитории не запускают Glicko-2,
+пересчёт: автоматическая оркестрация существующих closer/persister/publisher не переносит
+бизнес-логику в scheduler.
 
 ## 10. Авторизация
 

@@ -27,6 +27,7 @@ from pingstats.modules.matches.domain import (
     MatchContext,
     MatchParticipant,
     MatchResultRevision,
+    MatchRevisionOperation,
     MatchSet,
     MatchStatus,
     ResultSnapshot,
@@ -45,6 +46,11 @@ match_context_enum = Enum(
 match_status_enum = Enum(
     MatchStatus,
     name="match_status",
+    values_callable=_enum_values,
+)
+match_revision_operation_enum = Enum(
+    MatchRevisionOperation,
+    name="match_revision_operation",
     values_callable=_enum_values,
 )
 
@@ -70,6 +76,8 @@ class MatchModel(Base):
             "AND cancelled_at IS NULL AND winner_id IS NULL) OR "
             "(status = 'completed' AND started_at IS NOT NULL AND completed_at IS NOT NULL "
             "AND cancelled_at IS NULL AND winner_id IS NOT NULL) OR "
+            "(status = 'voided' AND started_at IS NOT NULL AND completed_at IS NOT NULL "
+            "AND cancelled_at IS NULL AND winner_id IS NULL) OR "
             "(status = 'cancelled' AND completed_at IS NULL AND cancelled_at IS NOT NULL "
             "AND winner_id IS NULL) OR "
             "(status = 'rejected' AND started_at IS NULL AND completed_at IS NULL "
@@ -259,6 +267,9 @@ class MatchResultRevisionModel(Base):
     previous_result: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     new_result: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    operation: Mapped[MatchRevisionOperation | None] = mapped_column(
+        match_revision_operation_enum, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -273,4 +284,5 @@ class MatchResultRevisionModel(Base):
             new_result=ResultSnapshot.from_json(self.new_result),
             reason=self.reason,
             created_at=self.created_at,
+            operation=self.operation,
         )

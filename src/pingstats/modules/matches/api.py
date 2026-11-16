@@ -24,6 +24,7 @@ from pingstats.modules.matches.schemas import (
     MatchResponse,
     MatchRevisionListResponse,
     MatchRevisionResponse,
+    VoidMatchRequest,
 )
 from pingstats.modules.users.domain import User
 
@@ -177,6 +178,24 @@ async def correct_match_result(
         actor_id=current_user.id,
         match_id=match_id,
         scores=[item.to_domain() for item in payload.sets],
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+    )
+    return MatchResponse.from_view(view)
+
+
+@matches_router.post("/{match_id}/void", response_model=MatchResponse)
+async def void_match(
+    match_id: UUID,
+    payload: VoidMatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
+    service: Annotated[MatchService, Depends(get_match_service)],
+) -> MatchResponse:
+    view, _ = await service.void_match(
+        uow,
+        actor_id=current_user.id,
+        match_id=match_id,
         expected_version=payload.expected_version,
         reason=payload.reason,
     )

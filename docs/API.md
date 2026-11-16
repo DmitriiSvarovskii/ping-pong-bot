@@ -34,7 +34,6 @@ Base path: `/api/v1`. JSON, UTC timestamps ISO 8601, UUID strings. Все endpoi
 | GET | `/users/search` | Реализовано; `q` 1…100 символов, `limit`, `offset`; имя/фамилия/username |
 | GET | `/users/{user_id}` | Публичный профиль |
 | GET | `/users/{user_id}/matches` | История матчей |
-| GET | `/users/{user_id}/rating-history` | История rating/RD/volatility |
 | GET | `/users/{user_id}/statistics` | Статистика |
 | GET | `/users/{user_id}/head-to-head/{opponent_id}` | Личные встречи |
 
@@ -125,6 +124,7 @@ fields не считаются доверенными. Неверная подп
 | PUT | `/matches/{id}/results` | Записать весь завершённый результат; идентичный retry идемпотентен |
 | PATCH | `/matches/{id}/results` | Исправить completed-матч в 24-часовом окне; добавить audit revision |
 | GET | `/matches/{id}/revisions` | Аудит исправлений |
+| POST | `/matches/{id}/void` | Аннулировать completed standalone match (organizer, version) |
 
 ## 5. Игровые сессии
 
@@ -185,6 +185,16 @@ Endpoint ничего не записывает, не возвращает гл�
 PS-007.5b подтверждает контракт реальными JWT/FastAPI/PostgreSQL E2E: полный flow A/B/C,
 двухпользовательская очередь, active join/waiting leave, pause/resume, cancel/cancel-and-leave,
 идемпотентный retry, stale match, запрет standalone correction и lifecycle/permission errors.
+
+Исправление session match: `PATCH /game-sessions/{session_id}/matches/{match_id}/results` с
+`sets`, `expected_version`, optional `reason`. Аннулирование: `POST
+/game-sessions/{session_id}/matches/{match_id}/void` с `expected_version` и optional `reason`.
+Обе команды доступны только organizer активной/завершённой сессии. Для rated match команда в той
+же транзакции версионирует неопубликованный input snapshot либо создаёт/supersede-ит persistent
+rebuild. `409 rating_correction_history_conflict` означает, что безопасный исходный rating input
+отсутствует или состояние истории не поддерживает correction; match и revision при этом полностью
+откатываются. `409 rating_rebuild_in_progress` используется внутренними стадиями normal rating
+workflow, когда persistent barrier запрещает зависимый расчёт или публикацию.
 OpenAPI содержит все session paths, Bearer security, обязательный `match_id` и документированные
 400/401/403/404/409/422 responses. Swagger UI доступен локально по `/docs`.
 
@@ -275,17 +285,103 @@ session WebSocket с REST fallback. HTTP 409 считается stale state: п�
 
 | Method | Path | Назначение |
 |---|---|---|
-| GET | `/ratings/me` | Текущий rating/RD/volatility |
+| GET | `/ratings/me` | Реализовано; текущий опубликованный рейтинг авторизованного пользователя |
+| GET | `/ratings/{user_id}` | Реализовано; текущий опубликованный рейтинг игрока |
+| GET | `/ratings/{user_id}/history` | Реализовано; active published history, `limit` 1…100, `offset >= 0` |
 | GET | `/rating-periods` | Опубликованные периоды |
 | POST | `/rating-periods/run-due` | Только development; вручную вызвать тот же идемпотентный catch-up, что scheduler; production 404 |
-| GET | `/leaderboard` | Рейтинг с pagination |
+| GET | `/leaderboard` | Реализовано; глобальный рейтинг, `limit` 1…100, `offset >= 0` |
 | GET | `/statistics/me` | Моя статистика |
 | GET | `/notifications` | Уведомления |
 | POST | `/notifications/{id}/read` | Пометить прочитанным |
 | GET | `/notification-preferences` | Настройки |
 | PUT | `/notification-preferences` | Заменить настройки |
 
-Production administrative endpoints закрытия/пересчёта периода не публикуются обычному клиенту. Автоматический scheduler закрывает сутки в 00:00 UTC и догоняет пропущенные периоды после рестарта. Development-only `run-due` не принимает границы/параметры периода и не позволяет пересчитать произвольный опубликованный период.
+Production administrative endpoints закрытия/пересчёта периода не публикуются обычному клиенту. Автоматический scheduler закрывает сутки начиная с 00:05 UTC и догоняет пропущенные периоды после рестарта. Development-only `run-due` не принимает границы/параметры периода и не позволяет пересчитать произвольный опубликованный период.
+
+Все три реализованных rating endpoint требуют Bearer JWT. Текущий рейтинг имеет контракт:
+
+```json
+{
+  "user_id": "uuid",
+  "rating": "1612.50000",
+  "rd": "75.00000",
+  "effective_rd": "77.14221",
+  "volatility": "0.0600000000",
+  "rated_matches_count": 8,
+  "as_of_period_id": "uuid",
+  "as_of_period_ends_at": "2026-11-11T00:00:00Z",
+  "inactivity_periods": 3,
+  "updated_at": "2026-11-11T00:05:00Z"
+}
+```
+
+`rating`, `rd` и `volatility` — сохранённое состояние последней active published версии.
+`effective_rd` — read-only projection того же состояния после одного Glicko-2 inactivity step за
+каждые полностью завершённые UTC-сутки после `as_of_period_ends_at`; текущие незавершённые сутки не
+учитываются. Projection использует параметры соответствующего опубликованного периода, не изменяет
+`ratings`/snapshots и не является новой публикацией. `inactivity_periods` явно показывает число
+применённых шагов. Decimal значения сериализуются строками для сохранения точности.
+
+История возвращается от нового периода к старому:
+
+```json
+{
+  "items": [{
+    "period_id": "uuid",
+    "period_starts_at": "2026-11-10T00:00:00Z",
+    "period_ends_at": "2026-11-11T00:00:00Z",
+    "published_at": "2026-11-11T00:05:00Z",
+    "rating_before": "1600.00000",
+    "rating_after": "1612.50000",
+    "rd_before": "80.00000",
+    "rd_after": "75.00000",
+    "volatility_before": "0.0600000000",
+    "volatility_after": "0.0600000000",
+    "games_count": 2,
+    "is_active": true
+  }],
+  "total": 1,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+История выбирает result только с `calculation_version = rating_periods.published_version`; shadow
+versions rebuild не видны. Shared PostgreSQL publication lock не позволяет одному response увидеть
+часть состояния до cutover и часть после него. Игрок без опубликованного current rating получает
+`404 rating_not_found`; его history является корректной пустой страницей и не материализует rating.
+
+`GET /leaderboard` требует Bearer JWT и возвращает:
+
+```json
+{
+  "items": [{
+    "position": 1,
+    "user_id": "uuid",
+    "first_name": "Дмитрий",
+    "last_name": "Сваровский",
+    "username": "swarovski",
+    "photo_url": "https://...",
+    "rating": "1612.50000",
+    "rd": "75.00000",
+    "effective_rd": "77.14221",
+    "rated_matches_count": 8
+  }],
+  "total": 42,
+  "limit": 20,
+  "offset": 0,
+  "current_user_position": 27
+}
+```
+
+В таблицу входят все игроки, имеющие current rating из active published history; минимального числа
+матчей и максимального RD для допуска нет. Ранжирование выполняется PostgreSQL: rating DESC, RD ASC,
+`rated_matches_count` DESC, UUID ASC. `current_user_position` возвращается независимо от страницы и
+равен `null`, если у авторизованного пользователя ещё нет опубликованного рейтинга. `effective_rd`
+имеет ту же read-only семантику ADR-044, что Rating API. Профиль и рейтинг загружаются одним page
+query без N+1; metadata позиции/total — отдельным постоянным запросом. Shared publication lock
+гарантирует, что оба запроса относятся к одной стороне atomic cutover.
 
 ## 8. Permissions summary
 
@@ -295,6 +391,10 @@ Production administrative endpoints закрытия/пересчёта пери
 - Обычный result: только участник.
 - Session result: любой active participant сессии.
 - Tournament result: участник конкретного матча или organizer.
-- Correction: участник до 24 часов после completion; session/tournament organizer без срока в своём контексте; reason необязателен, полный audit обязателен.
+- Correction: standalone-результат исправляет только `matches.created_by` в течение 24 часов после
+  неизменяемого `completed_at`; session-результат — только organizer сессии без срока, включая
+  завершённую сессию. Organizer может аннулировать completed standalone/session match без срока;
+  `voided` не считается cancellation и исключается из rating/statistics. Tournament correction
+  остаётся запланированным правилом своего модуля. Reason необязателен, полный audit обязателен.
 - Start/complete/cancel: organizer; запись результата доступна любому active participant и запускает автоматическую ротацию.
 - Active-session join добавляет пользователя в waiting tail; waiting user может выйти, organizer — удалить. Current player сначала завершает или отменяет матч.

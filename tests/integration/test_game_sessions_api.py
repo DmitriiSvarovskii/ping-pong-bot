@@ -38,6 +38,11 @@ from pingstats.modules.matches.infrastructure.models import (
     MatchSetModel,
 )
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
+from pingstats.modules.ratings.infrastructure.models import RatingPeriodMatchInputModel
+from pingstats.modules.ratings.infrastructure.repository import (
+    SqlAlchemyRatingInputRepository,
+    SqlAlchemyRatingPeriodRepository,
+)
 from pingstats.modules.users.infrastructure.models import UserModel
 
 pytestmark = pytest.mark.skipif(
@@ -66,6 +71,11 @@ async def _cleanup_test_data(
     async with session_factory() as session:
         session_ids = select(GameSessionModel.id).where(GameSessionModel.organizer_id.in_(user_ids))
         match_ids = select(MatchModel.id).where(MatchModel.game_session_id.in_(session_ids))
+        await session.execute(
+            delete(RatingPeriodMatchInputModel).where(
+                RatingPeriodMatchInputModel.match_id.in_(match_ids)
+            )
+        )
         await session.execute(
             delete(MatchResultRevisionModel).where(MatchResultRevisionModel.match_id.in_(match_ids))
         )
@@ -146,12 +156,16 @@ async def game_sessions_api_environment() -> AsyncIterator[ApiEnvironment]:
 
 
 async def _create_session(
-    env: ApiEnvironment, organizer: UUID, *, name: str = "E2E session"
+    env: ApiEnvironment,
+    organizer: UUID,
+    *,
+    name: str = "E2E session",
+    is_ranked: bool = True,
 ) -> UUID:
     response = await env.client.post(
         "/api/v1/game-sessions",
         headers=env.auth(organizer),
-        json={"name": name, "points_to_win": 11, "sets_to_win": 1, "is_ranked": True},
+        json={"name": name, "points_to_win": 11, "sets_to_win": 1, "is_ranked": is_ranked},
     )
     assert response.status_code == 201, response.text
     return UUID(response.json()["id"])
@@ -590,6 +604,58 @@ async def _new_started_session(
     return session_id, await _current(env, session_id, players[0])
 
 
+async def test_session_correction_and_void_api_preserve_session_history(
+    game_sessions_api_environment: ApiEnvironment,
+) -> None:
+    env = game_sessions_api_environment
+    organizer, player = env.users[:2]
+    session_id = await _create_session(env, organizer, name="Correction API", is_ranked=True)
+    assert (await _join(env, session_id, player)).status_code == 200
+    assert (await _start(env, session_id, organizer)).status_code == 200
+    current = await _current(env, session_id, organizer)
+    recorded = await _record(env, session_id, player, current["id"], 11, 4)
+    assert recorded.status_code == 200
+    completed_match = recorded.json()["match"]
+
+    forbidden = await env.client.patch(
+        f"/api/v1/game-sessions/{session_id}/matches/{current['id']}/results",
+        headers=env.auth(player),
+        json={
+            "sets": [{"player1_score": 4, "player2_score": 11}],
+            "expected_version": completed_match["version"],
+        },
+    )
+    assert forbidden.status_code == 403
+    corrected = await env.client.patch(
+        f"/api/v1/game-sessions/{session_id}/matches/{current['id']}/results",
+        headers=env.auth(organizer),
+        json={
+            "sets": [{"player1_score": 4, "player2_score": 11}],
+            "expected_version": completed_match["version"],
+            "reason": "score fixed",
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["winner_id"] == str(player)
+    assert (
+        await env.client.post(
+            f"/api/v1/game-sessions/{session_id}/complete", headers=env.auth(organizer)
+        )
+    ).status_code == 200
+    voided = await env.client.post(
+        f"/api/v1/game-sessions/{session_id}/matches/{current['id']}/void",
+        headers=env.auth(organizer),
+        json={"expected_version": corrected.json()["version"], "reason": "annulled"},
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["status"] == "voided"
+    statistics = await env.client.get(
+        f"/api/v1/game-sessions/{session_id}/statistics", headers=env.auth(organizer)
+    )
+    assert statistics.status_code == 200
+    assert all(item["wins"] == item["losses"] == 0 for item in statistics.json()["items"])
+
+
 @pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_CONCURRENCY") != "1",
     reason="requires explicit permission for committed concurrent PostgreSQL rows",
@@ -674,6 +740,8 @@ class FailingSuccessorUow(SqlAlchemyUnitOfWork):
         self.game_sessions = SqlAlchemyGameSessionRepository(self.session)
         self.current_matches = SqlAlchemyCurrentSessionMatchChecker(self.session)
         self.matches = FailingSuccessorMatchRepository(self.session)
+        self.rating_periods = SqlAlchemyRatingPeriodRepository(self.session)
+        self.rating_inputs = SqlAlchemyRatingInputRepository(self.session)
         return self
 
 

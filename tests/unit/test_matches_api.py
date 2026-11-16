@@ -53,6 +53,10 @@ async def test_all_match_routes_require_jwt() -> None:
                 f"/api/v1/matches/{match_id}/results",
                 json={**complete_sets, "expected_version": 3},
             ),
+            await client.post(
+                f"/api/v1/matches/{match_id}/void",
+                json={"expected_version": 3},
+            ),
             await client.get(f"/api/v1/matches/{match_id}/revisions"),
         ]
 
@@ -90,6 +94,7 @@ def test_openapi_contains_all_match_routes() -> None:
         "/api/v1/matches/{match_id}/sets",
         "/api/v1/matches/{match_id}/results",
         "/api/v1/matches/{match_id}/revisions",
+        "/api/v1/matches/{match_id}/void",
     } <= set(paths)
     result_operations = paths["/api/v1/matches/{match_id}/results"]
     assert {"put", "patch"} <= set(result_operations)

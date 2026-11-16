@@ -1,6 +1,6 @@
 """Persistence ports used by match application services."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol
@@ -11,9 +11,17 @@ from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
     MatchResultRevision,
+    MatchRevisionOperation,
     MatchStatus,
     ResultSnapshot,
     SetScore,
+)
+from pingstats.modules.ratings.application.ports import (
+    RatingInputRepository,
+    RatingPeriodRepository,
+    RatingRebuildJobRepository,
+    RatingRebuildPeriodRepository,
+    RatingRecalculationRepository,
 )
 
 
@@ -86,6 +94,8 @@ class MatchRepository(Protocol):
 
     async def replace_sets(self, match_id: UUID, scores: Sequence[SetScore]) -> None: ...
 
+    async def void_completed_match(self, match: Match) -> Match: ...
+
     async def create_revision(
         self,
         *,
@@ -94,6 +104,7 @@ class MatchRepository(Protocol):
         previous_result: ResultSnapshot,
         new_result: ResultSnapshot,
         reason: str | None,
+        operation: MatchRevisionOperation,
     ) -> MatchResultRevision: ...
 
     async def list_revisions(
@@ -103,6 +114,11 @@ class MatchRepository(Protocol):
 
 class MatchesUnitOfWork(Protocol):
     matches: MatchRepository
+    rating_periods: RatingPeriodRepository
+    rating_inputs: RatingInputRepository
+    rating_recalculations: RatingRecalculationRepository
+    rating_rebuild_jobs: RatingRebuildJobRepository
+    rating_rebuild_periods: RatingRebuildPeriodRepository
 
     async def __aenter__(self) -> "MatchesUnitOfWork": ...
 
@@ -116,3 +132,5 @@ class MatchesUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
     async def rollback(self) -> None: ...
+
+    def add_after_commit(self, key: Hashable, callback: Callable[[], Awaitable[None]]) -> None: ...

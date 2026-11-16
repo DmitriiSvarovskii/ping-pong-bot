@@ -24,6 +24,11 @@ from pingstats.modules.matches.infrastructure.models import (
 )
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
 from pingstats.modules.matches.infrastructure.uow import SqlAlchemyMatchesUnitOfWork
+from pingstats.modules.ratings.application import RatingCorrectionHistoryError
+from pingstats.modules.ratings.infrastructure.models import (
+    RatingPeriodMatchInputModel,
+    RatingPeriodModel,
+)
 from pingstats.modules.users.domain import User
 from pingstats.modules.users.infrastructure.models import UserModel
 from pingstats.modules.users.infrastructure.repository import SqlAlchemyUserRepository
@@ -32,6 +37,19 @@ pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_INTEGRATION") != "1",
     reason="requires an explicitly selected migrated local PostgreSQL database",
 )
+
+
+class FailingRevisionRepository(SqlAlchemyMatchRepository):
+    async def create_revision(self, **kwargs):
+        del kwargs
+        raise RuntimeError("injected revision failure")
+
+
+class FailingRevisionUow(SqlAlchemyMatchesUnitOfWork):
+    async def __aenter__(self) -> "FailingRevisionUow":
+        await super().__aenter__()
+        self.matches = FailingRevisionRepository(self.session)
+        return self
 
 
 def make_user(user_id: UUID, name: str) -> User:
@@ -81,6 +99,7 @@ async def test_repository_lifecycle_correction_history_and_constraints(
         creator_id=creator,
         invited_user_id=invited,
         sets_to_win=2,
+        is_ranked=False,
     )
     active = await service.accept(
         SqlAlchemyMatchesUnitOfWork(session_factory),
@@ -103,7 +122,7 @@ async def test_repository_lifecycle_correction_history_and_constraints(
     )
     corrected, revision = await service.correct_result(
         SqlAlchemyMatchesUnitOfWork(session_factory),
-        actor_id=invited,
+        actor_id=creator,
         match_id=completed.match.id,
         scores=[SetScore(9, 11), SetScore(8, 11)],
         expected_version=completed.match.version,
@@ -117,7 +136,7 @@ async def test_repository_lifecycle_correction_history_and_constraints(
             creator,
             status=MatchStatus.COMPLETED,
             context=None,
-            is_ranked=True,
+            is_ranked=False,
             limit=10,
             offset=0,
         )
@@ -153,6 +172,196 @@ async def test_repository_lifecycle_correction_history_and_constraints(
         with pytest.raises(IntegrityError):
             await session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
         await session.rollback()
+
+    voided, void_revision = await service.void_match(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=corrected.match.id,
+        expected_version=corrected.match.version,
+        reason="integration void",
+    )
+    assert voided.match.status is MatchStatus.VOIDED
+    assert voided.match.completed_at == completed.match.completed_at
+    assert voided.match.winner_id is None
+    assert len(voided.sets) == 2
+    assert void_revision.revision_number == 2
+
+
+async def test_revision_failure_rolls_back_match_change(
+    match_database: tuple[async_sessionmaker[AsyncSession], UUID, UUID],
+) -> None:
+    session_factory, creator, invited = match_database
+    service = MatchService()
+    pending = await service.create_standalone(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        creator_id=creator,
+        invited_user_id=invited,
+        is_ranked=False,
+    )
+    active = await service.accept(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=invited,
+        match_id=pending.match.id,
+    )
+    completed = await service.record_full_result(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 1), SetScore(11, 2), SetScore(11, 3)],
+    )
+    with pytest.raises(RuntimeError, match="injected revision failure"):
+        await service.void_match(
+            FailingRevisionUow(session_factory),
+            actor_id=creator,
+            match_id=completed.match.id,
+            expected_version=completed.match.version,
+            reason=None,
+        )
+    async with session_factory() as session:
+        stored = await session.get(MatchModel, completed.match.id)
+        revision_count = await session.scalar(
+            select(func.count())
+            .select_from(MatchResultRevisionModel)
+            .where(MatchResultRevisionModel.match_id == completed.match.id)
+        )
+    assert stored is not None and stored.status is MatchStatus.COMPLETED
+    assert stored.winner_id == creator
+    assert revision_count == 0
+
+
+async def test_ranked_open_period_correction_and_void_are_versioned_atomically(
+    match_database: tuple[async_sessionmaker[AsyncSession], UUID, UUID],
+) -> None:
+    session_factory, creator, invited = match_database
+    service = MatchService()
+    pending = await service.create_standalone(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        creator_id=creator,
+        invited_user_id=invited,
+        is_ranked=True,
+    )
+    active = await service.accept(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=invited,
+        match_id=pending.match.id,
+    )
+    completed = await service.record_full_result(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 1), SetScore(11, 2), SetScore(11, 3)],
+    )
+    async with session_factory() as session:
+        initial_period = await session.scalar(
+            select(RatingPeriodModel)
+            .join(
+                RatingPeriodMatchInputModel,
+                RatingPeriodMatchInputModel.period_id == RatingPeriodModel.id,
+            )
+            .where(RatingPeriodMatchInputModel.match_id == completed.match.id)
+        )
+    assert initial_period is not None
+    initial_calculation_version = initial_period.calculation_version
+    corrected, revision = await service.correct_result(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=completed.match.id,
+        scores=[SetScore(1, 11), SetScore(2, 11), SetScore(3, 11)],
+        expected_version=completed.match.version,
+        reason="rated correction",
+    )
+    async with session_factory() as session:
+        period = await session.scalar(
+            select(RatingPeriodModel)
+            .join(
+                RatingPeriodMatchInputModel,
+                RatingPeriodMatchInputModel.period_id == RatingPeriodModel.id,
+            )
+            .where(RatingPeriodMatchInputModel.match_id == completed.match.id)
+        )
+        inputs = (
+            await session.scalars(
+                select(RatingPeriodMatchInputModel)
+                .where(RatingPeriodMatchInputModel.match_id == completed.match.id)
+                .order_by(RatingPeriodMatchInputModel.calculation_version)
+            )
+        ).all()
+    assert period is not None
+    assert period.calculation_version == initial_calculation_version + 1
+    assert period.calculated_version is None
+    assert [item.calculation_version for item in inputs] == [
+        initial_calculation_version,
+        initial_calculation_version + 1,
+    ]
+    assert inputs[-1].correction_revision_id == revision.id
+    assert inputs[-1].source_match_version == corrected.match.version
+
+    voided, _ = await service.void_match(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=corrected.match.id,
+        expected_version=corrected.match.version,
+        reason="rated void",
+    )
+    async with session_factory() as session:
+        period = await session.get(RatingPeriodModel, period.id)
+        current_input = await session.get(
+            RatingPeriodMatchInputModel,
+            (period.id, period.calculation_version, completed.match.id),
+        )
+    assert voided.match.status is MatchStatus.VOIDED
+    assert period.calculation_version == initial_calculation_version + 2
+    assert current_input is None
+
+
+async def test_missing_rating_input_rolls_back_match_revision(
+    match_database: tuple[async_sessionmaker[AsyncSession], UUID, UUID],
+) -> None:
+    session_factory, creator, invited = match_database
+    service = MatchService()
+    pending = await service.create_standalone(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        creator_id=creator,
+        invited_user_id=invited,
+        is_ranked=True,
+    )
+    active = await service.accept(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=invited,
+        match_id=pending.match.id,
+    )
+    completed = await service.record_full_result(
+        SqlAlchemyMatchesUnitOfWork(session_factory),
+        actor_id=creator,
+        match_id=active.match.id,
+        scores=[SetScore(11, 1), SetScore(11, 2), SetScore(11, 3)],
+    )
+    async with session_factory() as session:
+        await session.execute(
+            delete(RatingPeriodMatchInputModel).where(
+                RatingPeriodMatchInputModel.match_id == completed.match.id
+            )
+        )
+        await session.commit()
+    with pytest.raises(RatingCorrectionHistoryError):
+        await service.correct_result(
+            SqlAlchemyMatchesUnitOfWork(session_factory),
+            actor_id=creator,
+            match_id=completed.match.id,
+            scores=[SetScore(1, 11), SetScore(2, 11), SetScore(3, 11)],
+            expected_version=completed.match.version,
+            reason=None,
+        )
+    async with session_factory() as session:
+        stored = await session.get(MatchModel, completed.match.id)
+        revisions = await session.scalar(
+            select(func.count())
+            .select_from(MatchResultRevisionModel)
+            .where(MatchResultRevisionModel.match_id == completed.match.id)
+        )
+    assert stored is not None and stored.version == completed.match.version
+    assert stored.winner_id == completed.match.winner_id
+    assert revisions == 0
 
 
 @pytest.mark.skipif(
@@ -223,6 +432,7 @@ async def test_match_races_are_serialized_and_cleaned_up() -> None:
             SqlAlchemyMatchesUnitOfWork(database.session_factory),
             creator_id=creator,
             invited_user_id=invited,
+            is_ranked=True,
         )
         full_match = await service.accept(
             SqlAlchemyMatchesUnitOfWork(database.session_factory),
@@ -238,7 +448,7 @@ async def test_match_races_are_serialized_and_cleaned_up() -> None:
                     match_id=full_match.match.id,
                     scores=scores,
                 )
-                for actor in (creator, invited)
+                for actor in (creator, creator)
             )
         )
         assert {item.match.version for item in full_results} == {3}
@@ -254,7 +464,7 @@ async def test_match_races_are_serialized_and_cleaned_up() -> None:
                     expected_version=correction_version,
                     reason="concurrent correction",
                 )
-                for actor in (creator, invited)
+                for actor in (creator, creator)
             ),
             return_exceptions=True,
         )
@@ -279,11 +489,115 @@ async def test_match_races_are_serialized_and_cleaned_up() -> None:
                 .select_from(MatchResultRevisionModel)
                 .where(MatchResultRevisionModel.match_id == full_match.match.id)
             )
+            rated_versions = (
+                await session.scalars(
+                    select(RatingPeriodMatchInputModel.calculation_version)
+                    .where(RatingPeriodMatchInputModel.match_id == full_match.match.id)
+                    .order_by(RatingPeriodMatchInputModel.calculation_version)
+                )
+            ).all()
         assert set_count == 3
         assert revision_count == 1
+        assert len(rated_versions) == 2
+        assert rated_versions[1] == rated_versions[0] + 1
+
+        race_match = await service.create_standalone(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            creator_id=creator,
+            invited_user_id=invited,
+            is_ranked=False,
+        )
+        race_match = await service.accept(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            actor_id=invited,
+            match_id=race_match.match.id,
+        )
+        race_match = await service.record_full_result(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            actor_id=creator,
+            match_id=race_match.match.id,
+            scores=scores,
+        )
+        correction_vs_void = await asyncio.gather(
+            service.correct_result(
+                SqlAlchemyMatchesUnitOfWork(database.session_factory),
+                actor_id=creator,
+                match_id=race_match.match.id,
+                scores=[SetScore(1, 11), SetScore(2, 11), SetScore(3, 11)],
+                expected_version=race_match.match.version,
+                reason="race correction",
+            ),
+            service.void_match(
+                SqlAlchemyMatchesUnitOfWork(database.session_factory),
+                actor_id=creator,
+                match_id=race_match.match.id,
+                expected_version=race_match.match.version,
+                reason="race void",
+            ),
+            return_exceptions=True,
+        )
+        successful = [item for item in correction_vs_void if not isinstance(item, BaseException)]
+        assert len(successful) == 1
+        assert len([item for item in correction_vs_void if isinstance(item, BaseException)]) == 1
+
+        void_race = await service.create_standalone(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            creator_id=creator,
+            invited_user_id=invited,
+            is_ranked=False,
+        )
+        void_race = await service.accept(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            actor_id=invited,
+            match_id=void_race.match.id,
+        )
+        void_race = await service.record_full_result(
+            SqlAlchemyMatchesUnitOfWork(database.session_factory),
+            actor_id=creator,
+            match_id=void_race.match.id,
+            scores=scores,
+        )
+        void_results = await asyncio.gather(
+            *(
+                service.void_match(
+                    SqlAlchemyMatchesUnitOfWork(database.session_factory),
+                    actor_id=creator,
+                    match_id=void_race.match.id,
+                    expected_version=void_race.match.version,
+                    reason="concurrent void",
+                )
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+        assert len([item for item in void_results if not isinstance(item, BaseException)]) == 1
+        assert len([item for item in void_results if isinstance(item, BaseException)]) == 1
+        async with database.session_factory() as session:
+            race_revision_counts = dict(
+                (
+                    await session.execute(
+                        select(
+                            MatchResultRevisionModel.match_id,
+                            func.count(MatchResultRevisionModel.id),
+                        )
+                        .where(
+                            MatchResultRevisionModel.match_id.in_(
+                                (race_match.match.id, void_race.match.id)
+                            )
+                        )
+                        .group_by(MatchResultRevisionModel.match_id)
+                    )
+                ).all()
+            )
+        assert race_revision_counts == {race_match.match.id: 1, void_race.match.id: 1}
     finally:
         async with database.session_factory() as session:
             match_ids = select(MatchModel.id).where(MatchModel.created_by == creator)
+            await session.execute(
+                delete(RatingPeriodMatchInputModel).where(
+                    RatingPeriodMatchInputModel.match_id.in_(match_ids)
+                )
+            )
             await session.execute(
                 delete(MatchResultRevisionModel).where(
                     MatchResultRevisionModel.match_id.in_(match_ids)

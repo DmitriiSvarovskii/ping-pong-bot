@@ -15,7 +15,12 @@ from pingstats.modules.game_sessions.application.dto import (
 )
 from pingstats.modules.game_sessions.domain import GameSessionParticipant, GameSessionStatus
 from pingstats.modules.matches.application.dto import MatchView
-from pingstats.modules.matches.schemas import MatchResponse, SetScoreInput
+from pingstats.modules.matches.schemas import (
+    CorrectResultRequest,
+    MatchResponse,
+    SetScoreInput,
+    VoidMatchRequest,
+)
 from pingstats.modules.users.schemas import UserPublicResponse
 
 
@@ -199,6 +204,14 @@ class SessionSetRequest(CurrentSessionMatchRequest, SetScoreInput):
 class SessionResultRequest(CurrentSessionMatchRequest):
     sets: Annotated[list[SetScoreInput], Field(min_length=1, max_length=197)]
     expected_version: Annotated[StrictInt, Field(ge=1)] | None = None
+
+
+class SessionCorrectResultRequest(CorrectResultRequest):
+    pass
+
+
+class SessionVoidMatchRequest(VoidMatchRequest):
+    pass
 
 
 class SessionMatchCommandResponse(BaseModel):

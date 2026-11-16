@@ -29,6 +29,7 @@ def get_game_session_match_repository(
 
 def get_game_session_service(request: Request) -> GameSessionService:
     return GameSessionService(
+        rating_rebuild_notifier=request.app.state.rating_scheduler_wakeup,
         session_update_publisher=request.app.state.session_update_publisher,
         sessions_update_publisher=request.app.state.sessions_update_publisher,
     )

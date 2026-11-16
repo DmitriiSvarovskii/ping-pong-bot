@@ -41,6 +41,11 @@ from pingstats.modules.matches.application.errors import MatchStateError
 from pingstats.modules.matches.domain import MatchStatus, SetScore
 from pingstats.modules.matches.infrastructure.models import MatchModel, MatchSetModel
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
+from pingstats.modules.ratings.infrastructure.models import RatingPeriodMatchInputModel
+from pingstats.modules.ratings.infrastructure.repository import (
+    SqlAlchemyRatingInputRepository,
+    SqlAlchemyRatingPeriodRepository,
+)
 from pingstats.modules.users.infrastructure.models import UserModel
 
 pytestmark = pytest.mark.skipif(
@@ -88,6 +93,8 @@ class FailingEventUow(SqlAlchemyUnitOfWork):
         self.game_sessions = FailingEventRepository(self.session)
         self.current_matches = SqlAlchemyCurrentSessionMatchChecker(self.session)
         self.matches = SqlAlchemyMatchRepository(self.session)
+        self.rating_periods = SqlAlchemyRatingPeriodRepository(self.session)
+        self.rating_inputs = SqlAlchemyRatingInputRepository(self.session)
         return self
 
 
@@ -104,6 +111,8 @@ class FailingQueueInitializationUow(SqlAlchemyUnitOfWork):
         self.game_sessions = FailingQueueInitializationRepository(self.session)
         self.current_matches = SqlAlchemyCurrentSessionMatchChecker(self.session)
         self.matches = SqlAlchemyMatchRepository(self.session)
+        self.rating_periods = SqlAlchemyRatingPeriodRepository(self.session)
+        self.rating_inputs = SqlAlchemyRatingInputRepository(self.session)
         return self
 
 
@@ -120,6 +129,8 @@ class FailingSuccessorUow(SqlAlchemyUnitOfWork):
         self.game_sessions = SqlAlchemyGameSessionRepository(self.session)
         self.current_matches = SqlAlchemyCurrentSessionMatchChecker(self.session)
         self.matches = FailingSuccessorMatchRepository(self.session)
+        self.rating_periods = SqlAlchemyRatingPeriodRepository(self.session)
+        self.rating_inputs = SqlAlchemyRatingInputRepository(self.session)
         return self
 
 
@@ -649,6 +660,12 @@ async def test_concurrent_join_start_and_join_vs_complete_are_serialized() -> No
     finally:
         async with database.session_factory() as session:
             if session_id is not None:
+                match_ids = select(MatchModel.id).where(MatchModel.game_session_id == session_id)
+                await session.execute(
+                    delete(RatingPeriodMatchInputModel).where(
+                        RatingPeriodMatchInputModel.match_id.in_(match_ids)
+                    )
+                )
                 await session.execute(
                     delete(GameSessionProcessedResultModel).where(
                         GameSessionProcessedResultModel.session_id == session_id
@@ -812,6 +829,12 @@ async def test_result_vs_cancel_and_result_vs_complete_are_serialized() -> None:
     finally:
         async with database.session_factory() as session:
             for session_id in session_ids:
+                match_ids = select(MatchModel.id).where(MatchModel.game_session_id == session_id)
+                await session.execute(
+                    delete(RatingPeriodMatchInputModel).where(
+                        RatingPeriodMatchInputModel.match_id.in_(match_ids)
+                    )
+                )
                 for model in (
                     GameSessionProcessedResultModel,
                     GameSessionQueueEventModel,
@@ -963,6 +986,12 @@ async def test_concurrent_rotation_join_leave_and_result_retry_preserve_queue() 
     finally:
         async with database.session_factory() as session:
             if session_id is not None:
+                match_ids = select(MatchModel.id).where(MatchModel.game_session_id == session_id)
+                await session.execute(
+                    delete(RatingPeriodMatchInputModel).where(
+                        RatingPeriodMatchInputModel.match_id.in_(match_ids)
+                    )
+                )
                 for model in (
                     GameSessionProcessedResultModel,
                     GameSessionQueueEventModel,

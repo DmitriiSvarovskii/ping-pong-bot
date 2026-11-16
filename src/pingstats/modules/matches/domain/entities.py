@@ -16,8 +16,14 @@ class MatchStatus(StrEnum):
     PENDING = "pending"
     ACTIVE = "active"
     COMPLETED = "completed"
+    VOIDED = "voided"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
+
+
+class MatchRevisionOperation(StrEnum):
+    CORRECTION = "correction"
+    VOID = "void"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +77,10 @@ class MatchSet:
 @dataclass(frozen=True, slots=True)
 class ResultSnapshot:
     sets: tuple[SetScore, ...]
-    winner_id: UUID
+    winner_id: UUID | None
+    status: MatchStatus | None = None
+    completed_at: datetime | None = None
+    match_version: int | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -83,7 +92,12 @@ class ResultSnapshot:
                 }
                 for number, score in enumerate(self.sets, start=1)
             ],
-            "winner_id": str(self.winner_id),
+            "winner_id": str(self.winner_id) if self.winner_id is not None else None,
+            "status": self.status.value if self.status is not None else None,
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at is not None else None
+            ),
+            "match_version": self.match_version,
         }
 
     @classmethod
@@ -100,7 +114,18 @@ class ResultSnapshot:
                 for item in raw_sets
                 if isinstance(item, dict)
             ),
-            winner_id=UUID(str(value["winner_id"])),
+            winner_id=(
+                UUID(str(value["winner_id"])) if value.get("winner_id") is not None else None
+            ),
+            status=(MatchStatus(str(value["status"])) if value.get("status") is not None else None),
+            completed_at=(
+                datetime.fromisoformat(str(value["completed_at"]))
+                if value.get("completed_at") is not None
+                else None
+            ),
+            match_version=(
+                int(value["match_version"]) if value.get("match_version") is not None else None
+            ),
         )
 
 
@@ -114,3 +139,4 @@ class MatchResultRevision:
     new_result: ResultSnapshot
     reason: str | None
     created_at: datetime
+    operation: MatchRevisionOperation | None = None

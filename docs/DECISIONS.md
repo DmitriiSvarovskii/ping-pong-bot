@@ -30,7 +30,11 @@ result и используют audit rows для invalidation/rebuild; hard dele
 
 ## ADR-007: Явная согласованность после ретроактивных исправлений
 
-**Статус:** принято. **Решение:** не переписывать молча последующие session matches/bracket; ставить `needs_review`, сохранять фактическую историю и создавать stale/review records. **Почему:** последующие игры реально произошли и не должны исчезать. **Следствия:** нужен отдельный согласованный resolution workflow; MVP показывает конфликт.
+**Статус:** принято; session-часть уточнена ADR-041. **Решение:** не переписывать молча последующие
+session matches/bracket и сохранять фактическую историю. Для session correction ADR-041 запрещает
+ретроспективное изменение очереди, ротации, пар, последующих матчей и status сессии; `needs_review`
+для сессии автоматически не устанавливается. Tournament bracket conflict по-прежнему использует
+отдельный review workflow. **Почему:** последующие игры реально произошли и не должны исчезать.
 
 ## ADR-008: PostgreSQL constraints плюс транзакционные locks
 
@@ -54,7 +58,16 @@ result и используют audit rows для invalidation/rebuild; hard dele
 
 ## ADR-013: Локальное автоматическое закрытие рейтинговых периодов
 
-**Статус:** принято. **Решение:** in-process scheduler из FastAPI lifespan вызывает общий `CloseDueRatingPeriods` в 00:00 UTC и при старте. Use case под PostgreSQL advisory lock создаёт/закрывает пропущенные сутки хронологически. Development-only ручной endpoint вызывает тот же use case. **Почему:** достаточно для локального монолита без преждевременного брокера задач. **Следствия:** status/version/unique period обеспечивают идемпотентность; Celery и Redis не используются; scheduler не содержит бизнес-математику.
+**Статус:** принято и реализовано в PS-012.5; scheduler orchestration расширена ADR-040.
+**Решение:** closer последовательно
+переводит сохранённые due periods из `open` в `calculating`; это запечатывает inputs, но ещё не
+вычисляет и не публикует rating. Каждый период использует тот же advisory lock и `FOR UPDATE`, что
+intake. Несколько API workers могут запустить цикл, поскольку PostgreSQL сериализует изменение;
+ошибка цикла повторяется через минуту. **Почему:** пяти минут достаточно как явное grace window для
+завершений около UTC-границы, а локальному монолиту не нужен отдельный broker/leader service.
+**Следствия:** restart выполняет catch-up всех существующих overdue `open` rows; повторный close не
+увеличивает version. Celery/Redis и ручной HTTP endpoint не добавляются. Пустые дни без period row
+этот этап не материализует.
 
 ## ADR-014: Динамический состав активной сессии и отмена матча
 
@@ -62,7 +75,11 @@ result и используют audit rows для invalidation/rebuild; hard dele
 
 ## ADR-015: Политика исправления результатов
 
-**Статус:** принято. **Решение:** любой участник — в течение 24 часов после completion; organizer сесии/турнира — без срока для матчей своего контекста. Reason необязателен, но author/time и оба полных снимка обязательны. **Почему:** игрокам даётся ограниченное окно, организаторам — возможность исправить архив контекста. **Следствия:** rating correction создаёт recalculation request; winner-changing correction не разрушает downstream sequence/bracket и переводит контекст в review при конфликте.
+**Статус:** заменено для standalone/session решением ADR-041; tournament policy остаётся отдельной.
+Историческая формулировка разрешала correction любому участнику в течение 24 часов. Актуальное
+утверждённое правило: standalone — только `created_by` в течение 24 часов, session — только organizer
+сессии без срока. Reason необязателен, но author/time и оба полных снимка обязательны. Rating
+correction атомарно создаёт recalculation records; downstream session history не переписывается.
 
 ## ADR-016: Rating seeding и walkover single elimination
 
@@ -299,3 +316,204 @@ same-origin custom header. Frontend coalesce-ит параллельные 401 �
 без смены JWT secret; нельзя утверждать, что удаление cookie отзовёт уже скопированный token. Если
 появятся logout нескольких устройств или security-session management, потребуется server-side
 hashed refresh-session store и rotation/revocation.
+
+## ADR-036: Атомарный intake рейтингового результата
+
+**Статус:** принято и реализовано в PS-012.4. **Решение:** после завершения ranked standalone или
+session match application orchestrator вызывает `RatingMatchInputRecorder` до commit через
+репозитории того же UoW. Recorder выбирает календарный UTC-период по `completed_at`, берёт общий с
+будущим closer transaction-level PostgreSQL advisory lock по UTC-дню, создаёт либо блокирует
+`rating_period` и принимает input только при `status=open`. PK периода/version/match и сравнение
+`source_match_version` с каноническим SHA-256 fingerprint превращают точный retry в no-op, а
+расхождение — в явный conflict без перезаписи. **Почему:** match result, session rotation и frozen
+rating input должны иметь одну границу атомарности; отдельная транзакция или after-commit доставка
+могли бы потерять input либо записать его после публикации периода. **Следствия:** lock order остаётся
+`match/session` до period advisory lock; реализованный PS-012.5 closer использует тот же lock
+protocol. Active, cancelled, unranked и структурно неполные результаты input не создают. Corrections,
+rebuild, вычисление и публикация числового rating не входят в intake.
+
+## ADR-037: Исторический source state и неперсистентный расчёт периода
+
+**Статус:** принято и реализовано в PS-012.6.1. **Решение:** `RatingPeriodCalculator` рассчитывает
+только период `calculating` и возвращает deterministic DTO, не записывая results и не меняя
+`ratings`/period status. Исходные состояния берутся из полного `rating_period_results` ближайшего
+предыдущего периода; current rating snapshot намеренно не читается. Первый период и новые участники
+получают initial state из parameter snapshot. Все предыдущие rated players входят в следующий
+расчёт, поэтому неактивным применяется стандартный рост RD. **Почему:** Glicko-2 использует
+одновременные состояния начала периода, а current snapshot может быть сформирован позже target
+period. UUID/timestamp persistence result сделал бы чистый повтор недетерминированным и преждевременно
+смешал calculation с publish boundary. **Следствия:** отсутствие/неполнота предыдущего result set или
+незавершённый предыдущий период дают controlled conflict и запрещают расчёт вне хронологической
+очереди. PS-012.6.2 должен атомарно преобразовать DTO в versioned `rating_period_results`, обеспечить
+идемпотентность хранения и только затем определить publish workflow.
+
+## ADR-038: Completion marker атомарного расчёта рейтингового периода
+
+**Статус:** принято и реализовано в PS-012.6.2.1. **Решение:** nullable
+`rating_periods.calculated_version` является единственным признаком полного сохранения calculation
+snapshot; расчёт завершён только при его равенстве текущему `calculation_version`.
+`RatingPeriodResultPersister` под общим period advisory lock и `FOR UPDATE` вычисляет DTO через
+существующий calculator, детерминированно добавляет все `rating_period_results` и обновляет marker в
+одной транзакции. Повтор сравнивает полный business snapshot; совпадение является no-op, любое
+расхождение или result rows без marker — controlled conflict без перезаписи. **Почему:** наличие хотя
+бы одной result row не отличает полный набор от частичного и не может представить успешно
+рассчитанный пустой период. Отдельный статус периода преждевременно усложнил бы state machine.
+**Следствия:** rollback атомарно убирает строки и marker; constraint допускает только NULL либо
+`0 < calculated_version <= calculation_version`. Смена calculation version автоматически делает
+старый marker неактуальным. Этот этап не меняет `ratings`, `published_at` или status и не является
+публикацией.
+
+## ADR-039: Глобально сериализованная атомарная публикация рейтинга
+
+**Статус:** принято и реализовано в PS-012.6.2.2. **Решение:** `RatingPeriodPublisher` читает только
+сохранённый snapshot с `calculated_version = calculation_version`. Перед period advisory lock и
+`FOR UPDATE` он берёт отдельный глобальный transaction-level publication advisory lock. В одной
+транзакции publisher проверяет хронологию и целостность snapshot, создаёт/обновляет все `ratings`,
+затем переводит период в `published` и устанавливает UTC `published_at`. **Почему:** lock одного
+периода не защищает общие player rating rows от одновременной публикации разных периодов; глобальный
+lock является минимальной надёжной координацией без новой таблицы или инфраструктуры. **Следствия:**
+publication throughput сознательно равен одному периоду за раз, что соответствует суточной модели.
+Точный повтор опубликованной версии — no-op с неизменным `published_at`; старая версия, разрыв
+хронологии, несовпадение rating-before/current state или повреждённый snapshot дают controlled
+conflict и полный rollback. С PS-012.6.3 scheduler запускает полный workflow согласно ADR-040.
+
+## ADR-040: Restart-safe orchestration рейтингового workflow
+
+**Статус:** принято и реализовано в PS-012.6.3. **Решение:** process-local
+`RatingPeriodScheduler` из FastAPI lifespan запускает единый `RatingWorkflowOrchestrator` при старте
+и ежедневно в `00:05 UTC`. Orchestrator переиспользует closer, persister и publisher, сохраняя их
+отдельные transaction boundaries, обрабатывает `calculating` periods строго по `starts_at` и после
+каждого этапа перечитывает durable state. **Почему:** status и completion marker уже являются
+достаточным checkpoint; дополнительная workflow-таблица или distributed worker не нужны. Несколько
+Uvicorn workers безопасны благодаря существующим PostgreSQL locks и идемпотентным повторам.
+**Следствия:** падение после close или persistence продолжается с следующего незавершённого этапа;
+ошибка раннего периода блокирует поздние. Инфраструктурная ошибка получает retry через 60 секунд,
+business/data conflict — только следующий плановый запуск и структурированный error log. Scheduler
+не материализует отсутствующие дни и не выполняет corrections/rebuild.
+
+## ADR-041: Политики correction и отдельное аннулирование завершённого матча
+
+**Статус:** принято и реализовано в PS-012.7.5. **Решение:** standalone result исправляет только organizer
+`matches.created_by` в течение 24 часов; session result — только organizer сессии без ограничения
+времени, включая completed session. Число corrections не ограничено, каждая создаёт immutable
+revision; участники и `completed_at` не меняются. Session correction не создаёт матч, не меняет
+очередь, ротацию, пары, последующие матчи или status сессии. Ранее completed match может быть
+аннулирован отдельным состоянием `voided`, не равным cancellation незавершённого матча; физическое
+удаление запрещено. **Почему:** organizer является владельцем контекста, а фактически сыгранная
+последовательность не должна ретроспективно переписываться. **Следствия:** текущая correction policy
+«любой standalone participant» и запрет session corrections должны быть заменены. `ResultSnapshot`
+расширяется outcome, nullable winner и immutable `completed_at`; voided match исключается из rating
+и played/win/loss projections. Аннулировать completed match может organizer без ограничения времени:
+как standalone, так и session match, в том числе после завершения сессии. С PS-012.7.6 rated
+correction/void разрешены при наличии исходного immutable rating input и атомарно координируются с
+versioned inputs либо persistent rebuild; отсутствие input даёт controlled conflict и полный
+rollback общей транзакции.
+
+## ADR-042: Shadow rebuild и атомарное переключение rating history
+
+**Статус:** полностью реализовано и проверено PS-012.7.4–PS-012.7.10: infrastructure,
+coordination/barrier, shadow calculation, atomic cutover, orchestration и PostgreSQL concurrency.
+**Решение:** добавлены
+`rating_periods.published_version`, persistent singleton `rating_rebuild_jobs`, per-period
+`rating_rebuild_periods` и связь recalculation requests с job. Active history читается только по
+`published_version`; монотонные `calculation_version` готовят shadow inputs/results, а
+`calculated_version` подтверждает полноту. Одновременно активен один rebuild, новая correction может
+supersede его. Horizon содержит существующие non-open зависимые periods; новые open periods и intake
+продолжают работать. Cutover одним commit переключает все active versions, current ratings и job,
+при этом игроки без оставшейся rated history удаляются из current `ratings`. **Почему:** in-place
+republication старых периодов временно показала бы смешанную историю и могла затереть более свежий
+rating. **Следствия:** первоначальный `published_at` сохраняется, cutover time хранится в job;
+Normal publisher теперь атомарно устанавливает `published_version` и читает predecessor через active
+version. Partial unique index считает `failed` незавершённым, поэтому ошибка не освобождает durable
+barrier; только `completed`/`superseded` допускают новый job. Persister и publisher проверяют
+barrier внутри global publication/period locks, а workflow останавливает проход без интенсивного
+retry. Partial shadow branch недоступна Rating API. Crash продолжается с checkpoints, failed job
+имеет явный manual retry через внутреннюю CLI-команду. Redis/Celery/broker не добавляются. Nullable
+request→job хранит текущее назначение; если
+потребуется полная история переназначений, понадобится отдельное append-only решение.
+
+Shadow executor использует зарезервированные target versions, строит inputs из актуального match и
+последней revision, исключает voided match и рассчитывает periods строго последовательно. Первый
+period опирается на предыдущую active published version, последующие — на shadow results
+предыдущего checkpoint. Результаты и checkpoint атомарны на период; job становится `ready` только
+после полной ветки. Это не является cutover: active versions/current ratings не переключаются.
+
+Cutover принимает только актуальный `ready` job с полным набором ready checkpoints и completion
+markers. В одной транзакции он активирует target versions, восстанавливает current ratings и
+cumulative match count из immutable inputs, завершает requests/job и тем самым освобождает barrier
+только после commit. Ранее published timestamps сохраняются; unpublished periods впервые
+публикуются временем cutover. Ошибка оставляет прежнюю published branch доступной, а повторный
+вызов completed job безопасно возвращает завершённое состояние.
+
+Один существующий in-process scheduler сначала обслуживает rebuild, затем normal workflow. Новый job
+будит scheduler after commit в создавшем процессе; остальные workers и рестарт обнаруживают durable
+job периодическим PostgreSQL polling с интервалом до 30 секунд. Business failure фиксирует job как
+`failed` и удерживает barrier; автоматического retry нет. Инфраструктурные сбои получают ограниченный
+backoff и затем degraded interval. Безопасный ручной retry — внутренняя CLI-команда, переводящая
+только текущий active failed job в `preparing`; checkpoints и target versions не пересоздаются.
+Отдельный worker, broker, Redis и Celery не вводятся.
+
+## ADR-043: Calendar inactivity без materialization пустых периодов
+
+**Статус:** принято и реализовано в PS-012.7.3. **Решение:** rating period остаётся календарными UTC-
+сутками, но пустые rows не создаются. Для algorithm version `2` calculator определяет число пропусков
+как `UTC-date(current.starts_at) - UTC-date(previous.ends_at)` и применяет к ранее рейтингованным
+игрокам эквивалентную многошаговую inactivity evolution:
+`phi_gap = sqrt(phi_before² + missing_periods × volatility²)`, с ограничением `max_rd`. Rating и
+volatility не меняются. Затем обычный calculation текущего периода применяется ровно один раз;
+соперники используют те же calendar-adjusted working states. Новый игрок получает initial state без
+inactivity до первого участия. **Почему:** sparse реализация version `1` недооценивала RD после
+календарных разрывов, а ежедневные snapshots всех игроков создавали бы лишний объём. Прямая формула
+эквивалентна последовательным пустым периодам, включая cap RD.
+
+**Совместимость:** `rating_before`, `rd_before`, `volatility_before` сохраняют исходный previous
+snapshot; промежуточное adjusted state существует только в calculator, поэтому publisher contract
+не меняется. Version `1` сохраняет legacy semantics, version `2` назначается новым periods. Уже
+рассчитанные snapshots не переинтерпретируются и автоматически не пересчитываются. Правило version
+`2` обязательно переиспользовать в normal calculation, rebuild и backfill. Пример 1 ноября →
+10 ноября учитывает восемь пропусков 2–9 ноября, но не удваивает 10 ноября. Политика read-time RD без
+новой publication утверждена отдельно в ADR-044.
+
+## ADR-044: Read-only effective RD и согласованное чтение рейтинга
+
+**Статус:** принято и реализовано в PS-012.8. **Решение:** Rating API всегда возвращает stored
+rating/RD/volatility последнего active published snapshot и отдельный `effective_rd`. Projection
+применяет существующий `Glicko2Strategy.advance_inactivity` к stored state по числу полностью
+завершённых UTC-суток после `as_of_period_ends_at`; незавершённые текущие сутки не учитываются.
+Параметры берутся из immutable snapshot соответствующего периода. Projection не записывается в БД,
+не меняет volatility/rating и сопровождается `inactivity_periods`.
+
+History SQL выбирает только `calculation_version = published_version`. Current state и history
+читаются под transaction-level shared advisory publication lock, совместимым с exclusive lock
+publisher/cutover. Поэтому concurrent atomic cutover не раскрывает shadow branch и не создаёт
+смешанный response. **Почему:** клиенту нужна актуальная оценка неопределённости между публикациями,
+но published snapshots должны оставаться воспроизводимыми и immutable. **Следствия:** игрок без
+published history получает 404 current rating и пустую history page; read не создаёт фиктивный
+rating. Effective RD является projection, а не опубликованным значением и не используется как
+predecessor будущего расчёта.
+
+С PS-012.9 тот же lock и projection используются глобальным leaderboard. Допуск не вводит новых
+порогов: участвует каждая строка current `ratings`, связанная с published period. Уникальная позиция
+вычисляется PostgreSQL как `row_number()` по rating DESC, RD ASC, `rated_matches_count` DESC и UUID
+ASC. Профиль присоединяется в page query без N+1, а position текущего пользователя вычисляется
+отдельно от pagination в рамках той же read transaction. Поэтому leaderboard также видит целиком
+старое либо новое состояние atomic cutover.
+
+## ADR-045: Historical rating backfill через обычный workflow
+
+**Статус:** принято и реализовано в PS-012.10. **Решение:** backfill не имеет отдельного
+математического или publication pipeline. Внутренняя CLI-команда выбирает current snapshots
+исторических `completed + ranked` матчей, записывает их существующим intake recorder и после commit
+запускает calculator/persister/publisher только для затронутых UTC-периодов. Новые periods используют
+актуальную algorithm version `2`; календарные разрывы обрабатывает ADR-043 без materialization пустых
+суток. Latest correction revision сохраняется в input, `voided`, `cancelled` и unranked исключаются.
+
+Весь intake запуска атомарен под global publication lock и согласованным period lock order.
+Идентичные inputs пропускаются, поэтому повтор после успешного intake или частичного workflow
+безопасен. Активный rebuild блокирует процедуру. Published snapshot никогда не меняется напрямую:
+missing/mismatched historical input sealed периода или попытка создать период перед опубликованной
+веткой завершает команду controlled conflict. **Почему:** автоматическое создание correction/rebuild
+без пользовательской revision исказило бы audit provenance. **Следствия:** такой конфликт требует
+отдельного согласованного rebuild/import процесса; текущий backfill намеренно fail-closed.
+Матч текущих UTC-суток при apply создаёт только input в `open` period: backfill не обходит штатное
+закрытие в 00:05 UTC, не создаёт ранний snapshot и не меняет current rating.

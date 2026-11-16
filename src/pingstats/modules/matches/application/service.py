@@ -16,23 +16,45 @@ from pingstats.modules.matches.application.errors import (
     SelfMatchError,
 )
 from pingstats.modules.matches.application.ports import MatchesUnitOfWork, MatchRepository
+from pingstats.modules.matches.application.result_editor import MatchResultEditor
 from pingstats.modules.matches.application.result_writer import MatchResultWriter
 from pingstats.modules.matches.domain import (
     InvalidMatchResultError,
     MatchContext,
     MatchResultRevision,
     MatchStatus,
-    ResultSnapshot,
     ScoreValidator,
     SetScore,
+)
+from pingstats.modules.ratings.application import (
+    RatingCorrectionCoordinator,
+    RatingMatchInputRecorder,
+)
+from pingstats.modules.ratings.application.ports import (
+    NullRatingRebuildNotifier,
+    RatingRebuildNotifier,
 )
 
 
 class MatchService:
     """Coordinate match commands under a row lock and explicit UoW."""
 
-    def __init__(self, *, result_writer: MatchResultWriter | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        result_writer: MatchResultWriter | None = None,
+        rating_input_recorder: RatingMatchInputRecorder | None = None,
+        result_editor: MatchResultEditor | None = None,
+        rating_correction_coordinator: RatingCorrectionCoordinator | None = None,
+        rating_rebuild_notifier: RatingRebuildNotifier | None = None,
+    ) -> None:
         self._result_writer = result_writer or MatchResultWriter()
+        self._rating_input_recorder = rating_input_recorder or RatingMatchInputRecorder()
+        self._result_editor = result_editor or MatchResultEditor(self._result_writer)
+        self._rating_correction_coordinator = (
+            rating_correction_coordinator or RatingCorrectionCoordinator()
+        )
+        self._rating_rebuild_notifier = rating_rebuild_notifier or NullRatingRebuildNotifier()
 
     async def create_standalone(
         self,
@@ -122,6 +144,10 @@ class MatchService:
             self._require_status(view, MatchStatus.ACTIVE)
             self._require_version(view, expected_version)
             result = await self._result_writer.add_set(uow.matches, view, score)
+            if result.match.status is MatchStatus.COMPLETED:
+                await self._rating_input_recorder.record(
+                    uow.rating_periods, uow.rating_inputs, result
+                )
             await uow.commit()
         return result
 
@@ -146,6 +172,7 @@ class MatchService:
             if expected_version is not None:
                 self._require_version(view, expected_version)
             result = await self._result_writer.record_full_result(uow.matches, view, scores)
+            await self._rating_input_recorder.record(uow.rating_periods, uow.rating_inputs, result)
             await uow.commit()
         return result
 
@@ -163,35 +190,66 @@ class MatchService:
         changed_at = now or datetime.now(UTC)
         async with uow:
             view = await self._locked_view(uow.matches, match_id)
-            self._require_participant(view, actor_id)
+            self._require_standalone(view)
+            if view.match.created_by != actor_id:
+                raise MatchPermissionError("Only the match organizer can correct its result")
             self._require_status(view, MatchStatus.COMPLETED)
             self._require_version(view, expected_version)
-            if view.match.context is not MatchContext.STANDALONE:
-                raise MatchStateError("This correction policy only supports standalone matches")
             if view.match.completed_at is None or changed_at > view.match.completed_at + timedelta(
                 hours=24
             ):
                 raise CorrectionWindowExpiredError
-            winner_position = self._result_writer.winner(view, scores, require_complete=True)
-            old_winner = view.match.winner_id
-            if old_winner is None:
-                raise MatchStateError
-            previous = ResultSnapshot(
-                sets=tuple(item.score() for item in view.sets), winner_id=old_winner
+            revision = await self._result_editor.correct(
+                uow.matches, view, actor_id=actor_id, scores=scores, reason=reason
             )
-            new = ResultSnapshot(sets=tuple(scores), winner_id=view.user_id_at(winner_position))
-            await uow.matches.replace_sets(match_id, scores)
-            await uow.matches.update_match(view.match, winner_id=new.winner_id)
-            revision = await uow.matches.create_revision(
-                match_id=match_id,
-                changed_by=actor_id,
-                previous_result=previous,
-                new_result=new,
-                reason=reason.strip() if reason else None,
-            )
-            await uow.commit()
             result = await self._required_view(uow.matches, match_id)
+            await self._coordinate_rating_correction(uow, result, revision)
+            await uow.commit()
         return result, revision
+
+    async def void_match(
+        self,
+        uow: MatchesUnitOfWork,
+        *,
+        actor_id: UUID,
+        match_id: UUID,
+        expected_version: int,
+        reason: str | None,
+    ) -> tuple[MatchView, MatchResultRevision]:
+        async with uow:
+            view = await self._locked_view(uow.matches, match_id)
+            self._require_standalone(view)
+            if view.match.created_by != actor_id:
+                raise MatchPermissionError("Only the match organizer can void it")
+            self._require_status(view, MatchStatus.COMPLETED)
+            self._require_version(view, expected_version)
+            revision = await self._result_editor.void(
+                uow.matches, view, actor_id=actor_id, reason=reason
+            )
+            result = await self._required_view(uow.matches, match_id)
+            await self._coordinate_rating_correction(uow, result, revision)
+            await uow.commit()
+        return result, revision
+
+    async def _coordinate_rating_correction(
+        self,
+        uow: MatchesUnitOfWork,
+        result: MatchView,
+        revision: MatchResultRevision,
+    ) -> None:
+        if not result.match.is_ranked:
+            return
+        rebuild_created = await self._rating_correction_coordinator.coordinate(
+            periods=uow.rating_periods,
+            inputs=uow.rating_inputs,
+            recalculations=uow.rating_recalculations,
+            rebuild_jobs=uow.rating_rebuild_jobs,
+            rebuild_periods=uow.rating_rebuild_periods,
+            match=result,
+            revision=revision,
+        )
+        if rebuild_created:
+            uow.add_after_commit("rating.rebuild", self._rating_rebuild_notifier.notify)
 
     async def get_match(
         self, repository: MatchRepository, *, actor_id: UUID, match_id: UUID
@@ -199,7 +257,8 @@ class MatchService:
         view = await repository.get_view(match_id)
         if view is None:
             raise MatchNotFoundError
-        self._require_participant(view, actor_id)
+        if actor_id not in view.participant_ids() and actor_id != view.match.created_by:
+            raise MatchPermissionError("Only a participant or match organizer may view it")
         return view
 
     async def list_matches(self, repository: MatchRepository, user_id: UUID, **filters):

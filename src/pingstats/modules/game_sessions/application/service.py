@@ -61,8 +61,17 @@ from pingstats.modules.matches.application.errors import (
     MatchVersionConflictError,
 )
 from pingstats.modules.matches.application.ports import MatchRepository
+from pingstats.modules.matches.application.result_editor import MatchResultEditor
 from pingstats.modules.matches.application.result_writer import MatchResultWriter
-from pingstats.modules.matches.domain import MatchStatus, SetScore
+from pingstats.modules.matches.domain import MatchResultRevision, MatchStatus, SetScore
+from pingstats.modules.ratings.application import (
+    RatingCorrectionCoordinator,
+    RatingMatchInputRecorder,
+)
+from pingstats.modules.ratings.application.ports import (
+    NullRatingRebuildNotifier,
+    RatingRebuildNotifier,
+)
 
 
 def _utc_now() -> datetime:
@@ -78,12 +87,22 @@ class GameSessionService:
         clock: Callable[[], datetime] = _utc_now,
         rotation_strategy: LoserRotatesStrategy | None = None,
         result_writer: MatchResultWriter | None = None,
+        rating_input_recorder: RatingMatchInputRecorder | None = None,
+        result_editor: MatchResultEditor | None = None,
+        rating_correction_coordinator: RatingCorrectionCoordinator | None = None,
+        rating_rebuild_notifier: RatingRebuildNotifier | None = None,
         session_update_publisher: SessionUpdatePublisher | None = None,
         sessions_update_publisher: SessionsUpdatePublisher | None = None,
     ) -> None:
         self._clock = clock
         self._rotation_strategy = rotation_strategy or LoserRotatesStrategy()
         self._result_writer = result_writer or MatchResultWriter(clock=clock)
+        self._rating_input_recorder = rating_input_recorder or RatingMatchInputRecorder(clock=clock)
+        self._result_editor = result_editor or MatchResultEditor(self._result_writer)
+        self._rating_correction_coordinator = (
+            rating_correction_coordinator or RatingCorrectionCoordinator(clock=clock)
+        )
+        self._rating_rebuild_notifier = rating_rebuild_notifier or NullRatingRebuildNotifier()
         self._session_update_publisher = session_update_publisher or NullSessionUpdatePublisher()
         self._sessions_update_publisher = sessions_update_publisher or NullSessionsUpdatePublisher()
 
@@ -486,6 +505,81 @@ class GameSessionService:
         completed_matches = await matches.list_completed_for_session(session_id)
         return calculate_session_statistics(session_id, users, completed_matches)
 
+    async def correct_session_match(
+        self,
+        uow: GameSessionsUnitOfWork,
+        *,
+        actor_id: UUID,
+        session_id: UUID,
+        match_id: UUID,
+        scores: Sequence[SetScore],
+        expected_version: int,
+        reason: str | None,
+    ) -> tuple[MatchView, MatchResultRevision]:
+        async with uow:
+            session = await self._locked_session(uow.game_sessions, session_id)
+            self._require_organizer(session, actor_id)
+            if session.status not in (GameSessionStatus.ACTIVE, GameSessionStatus.COMPLETED):
+                raise GameSessionStateError("Only active or completed sessions can be corrected")
+            view = await self._locked_session_match(uow.matches, session_id, match_id)
+            if view.match.version != expected_version:
+                raise MatchVersionConflictError
+            revision = await self._result_editor.correct(
+                uow.matches, view, actor_id=actor_id, scores=scores, reason=reason
+            )
+            result = await self._required_match_view(uow.matches, match_id)
+            await self._coordinate_rating_correction(uow, result, revision)
+            self._publish_session_updated_after_commit(uow, session.id)
+            await uow.commit()
+        return result, revision
+
+    async def void_session_match(
+        self,
+        uow: GameSessionsUnitOfWork,
+        *,
+        actor_id: UUID,
+        session_id: UUID,
+        match_id: UUID,
+        expected_version: int,
+        reason: str | None,
+    ) -> tuple[MatchView, MatchResultRevision]:
+        async with uow:
+            session = await self._locked_session(uow.game_sessions, session_id)
+            self._require_organizer(session, actor_id)
+            if session.status not in (GameSessionStatus.ACTIVE, GameSessionStatus.COMPLETED):
+                raise GameSessionStateError("Only active or completed sessions can be changed")
+            view = await self._locked_session_match(uow.matches, session_id, match_id)
+            if view.match.version != expected_version:
+                raise MatchVersionConflictError
+            revision = await self._result_editor.void(
+                uow.matches, view, actor_id=actor_id, reason=reason
+            )
+            result = await self._required_match_view(uow.matches, match_id)
+            await self._coordinate_rating_correction(uow, result, revision)
+            self._publish_session_updated_after_commit(uow, session.id)
+            await uow.commit()
+        return result, revision
+
+    async def _coordinate_rating_correction(
+        self,
+        uow: GameSessionsUnitOfWork,
+        result: MatchView,
+        revision: MatchResultRevision,
+    ) -> None:
+        if not result.match.is_ranked:
+            return
+        rebuild_created = await self._rating_correction_coordinator.coordinate(
+            periods=uow.rating_periods,
+            inputs=uow.rating_inputs,
+            recalculations=uow.rating_recalculations,
+            rebuild_jobs=uow.rating_rebuild_jobs,
+            rebuild_periods=uow.rating_rebuild_periods,
+            match=result,
+            revision=revision,
+        )
+        if rebuild_created:
+            uow.add_after_commit("rating.rebuild", self._rating_rebuild_notifier.notify)
+
     async def get_current_session_match(
         self,
         sessions: GameSessionRepository,
@@ -530,6 +624,9 @@ class GameSessionService:
                 raise MatchVersionConflictError
             updated = await self._result_writer.add_set(uow.matches, current, score)
             if updated.match.status is MatchStatus.COMPLETED:
+                await self._rating_input_recorder.record(
+                    uow.rating_periods, uow.rating_inputs, updated
+                )
                 result = await self._advance_after_result(uow, session, updated)
             else:
                 result = GameSessionMatchResult(
@@ -570,6 +667,7 @@ class GameSessionService:
             if expected_version is not None and current.match.version != expected_version:
                 raise MatchVersionConflictError
             updated = await self._result_writer.record_full_result(uow.matches, current, scores)
+            await self._rating_input_recorder.record(uow.rating_periods, uow.rating_inputs, updated)
             result = await self._advance_after_result(uow, session, updated)
             self._publish_session_updated_after_commit(uow, session.id)
             await uow.commit()
@@ -991,6 +1089,15 @@ class GameSessionService:
         if current is None or current.match.id != match_id:
             raise MatchStateError("The match is not the current active session match")
         return current
+
+    @staticmethod
+    async def _locked_session_match(
+        repository: MatchRepository, session_id: UUID, match_id: UUID
+    ) -> MatchView:
+        view = await repository.get_view(match_id, for_update=True)
+        if view is None or view.match.game_session_id != session_id:
+            raise MatchNotFoundError
+        return view
 
     @classmethod
     async def _locked_active_session(

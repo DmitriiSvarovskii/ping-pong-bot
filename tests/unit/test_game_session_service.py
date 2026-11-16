@@ -39,11 +39,15 @@ from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
     MatchParticipant,
+    MatchResultRevision,
+    MatchRevisionOperation,
     MatchSet,
     MatchStatus,
+    ResultSnapshot,
     SetScore,
 )
 from pingstats.modules.users.domain import User
+from tests.unit.rating_fakes import FakeRatingInputRepository, FakeRatingPeriodRepository
 
 
 def make_user(user_id: UUID, name: str) -> User:
@@ -60,6 +64,8 @@ class FakeGameSessionRepository:
         self.queue_states: dict[UUID, GameSessionQueueState] = {}
         self.processed_results: set[tuple[UUID, UUID]] = set()
         self.matches = FakeMatchRepository(users)
+        self.rating_periods = FakeRatingPeriodRepository()
+        self.rating_inputs = FakeRatingInputRepository()
 
     async def lock_user(self, user_id: UUID) -> bool:
         return user_id in self.users
@@ -257,6 +263,7 @@ class FakeMatchRepository:
     def __init__(self, users: dict[UUID, User]) -> None:
         self.users = users
         self.views: dict[UUID, MatchView] = {}
+        self.revisions: dict[UUID, list[MatchResultRevision]] = {}
 
     async def create_game_session_match(
         self,
@@ -403,6 +410,42 @@ class FakeMatchRepository:
             ),
         )
 
+    async def void_completed_match(self, match: Match) -> Match:
+        updated = replace(
+            match,
+            status=MatchStatus.VOIDED,
+            winner_id=None,
+            updated_at=datetime.now(UTC),
+            version=match.version + 1,
+        )
+        self.views[match.id] = replace(self.views[match.id], match=updated)
+        return updated
+
+    async def create_revision(
+        self,
+        *,
+        match_id: UUID,
+        changed_by: UUID,
+        previous_result: ResultSnapshot,
+        new_result: ResultSnapshot,
+        reason: str | None,
+        operation: MatchRevisionOperation,
+    ) -> MatchResultRevision:
+        revisions = self.revisions.setdefault(match_id, [])
+        revision = MatchResultRevision(
+            id=uuid4(),
+            match_id=match_id,
+            revision_number=len(revisions) + 1,
+            changed_by=changed_by,
+            previous_result=previous_result,
+            new_result=new_result,
+            reason=reason,
+            created_at=datetime.now(UTC),
+            operation=operation,
+        )
+        revisions.append(revision)
+        return revision
+
 
 class FakeUow:
     def __init__(
@@ -413,6 +456,11 @@ class FakeUow:
         self.game_sessions = repository
         self.current_matches = checker
         self.matches = repository.matches
+        self.rating_periods = repository.rating_periods
+        self.rating_inputs = repository.rating_inputs
+        self.rating_recalculations = object()
+        self.rating_rebuild_jobs = object()
+        self.rating_rebuild_periods = object()
         self.after_commit: dict[Hashable, Callable[[], Awaitable[None]]] = {}
 
     async def __aenter__(self) -> "FakeUow":
@@ -720,6 +768,75 @@ async def test_complete_preserves_results_and_excludes_unfinished_current_match(
         )
         == statistics
     )
+
+
+async def test_session_organizer_can_correct_and_void_without_retroactive_rotation(setup) -> None:
+    service, repository, checker, organizer, player, outsider = setup
+    created = await service.create_session(
+        uow(repository, checker), actor_id=organizer, is_ranked=False
+    )
+    await service.join_session(
+        uow(repository, checker), actor_id=player, session_id=created.session.id
+    )
+    await service.start_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    first = await repository.matches.get_current_for_session(created.session.id)
+    assert first is not None
+    recorded = await service.record_session_result(
+        uow(repository, checker),
+        actor_id=player,
+        session_id=created.session.id,
+        match_id=first.match.id,
+        scores=[SetScore(11, 4)],
+    )
+    successor_id = recorded.current_match.match.id
+    queue_before = repository.queue_states[created.session.id]
+    corrected, correction = await service.correct_session_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=first.match.id,
+        scores=[SetScore(4, 11)],
+        expected_version=recorded.match.match.version,
+        reason="fixed",
+    )
+    assert corrected.match.winner_id == player
+    assert correction.operation is MatchRevisionOperation.CORRECTION
+    assert repository.queue_states[created.session.id] == queue_before
+    current = await repository.matches.get_current_for_session(created.session.id)
+    assert current is not None and current.match.id == successor_id
+
+    await service.complete_session(
+        uow(repository, checker), actor_id=organizer, session_id=created.session.id
+    )
+    with pytest.raises(GameSessionPermissionError):
+        await service.void_session_match(
+            uow(repository, checker),
+            actor_id=outsider,
+            session_id=created.session.id,
+            match_id=first.match.id,
+            expected_version=corrected.match.version,
+            reason=None,
+        )
+    voided, revision = await service.void_session_match(
+        uow(repository, checker),
+        actor_id=organizer,
+        session_id=created.session.id,
+        match_id=first.match.id,
+        expected_version=corrected.match.version,
+        reason="annulled",
+    )
+    assert voided.match.status is MatchStatus.VOIDED
+    assert revision.operation is MatchRevisionOperation.VOID
+    assert repository.sessions[created.session.id].status is GameSessionStatus.COMPLETED
+    statistics = await service.get_session_statistics(
+        repository,
+        repository.matches,
+        actor_id=organizer,
+        session_id=created.session.id,
+    )
+    assert all(item.wins == 0 and item.losses == 0 for item in statistics)
 
 
 async def test_active_join_is_enqueued_and_waiting_leave_reindexes(setup) -> None:
