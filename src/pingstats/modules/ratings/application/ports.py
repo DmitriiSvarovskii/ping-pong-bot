@@ -1,10 +1,10 @@
 """Persistence ports for future rating-period application services."""
 
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from pingstats.modules.matches.application.dto import MatchView
@@ -22,6 +22,9 @@ from pingstats.modules.ratings.domain import (
     RatingRecalculationRequest,
     RatingRecalculationStatus,
 )
+
+if TYPE_CHECKING:
+    from pingstats.modules.ratings.application.status import RatingStatusFacts
 
 
 class RatingMatchRepository(Protocol):
@@ -65,7 +68,9 @@ class RatingRepository(Protocol):
 
 
 class RatingQueryRepository(Protocol):
-    async def get_current(self, user_id: UUID) -> tuple[PublishedRating, RatingPeriod] | None: ...
+    async def get_current(
+        self, user_id: UUID
+    ) -> tuple[PublishedRating, RatingPeriod, int] | None: ...
 
     async def list_history(
         self,
@@ -73,7 +78,15 @@ class RatingQueryRepository(Protocol):
         *,
         limit: int,
         offset: int,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> tuple[Sequence[tuple[RatingPeriodResult, RatingPeriod]], int]: ...
+
+    async def get_status(self, user_id: UUID, *, at: datetime) -> "RatingStatusFacts": ...
+
+    async def get_published_match_versions(
+        self, match_ids: Sequence[UUID]
+    ) -> Mapping[UUID, frozenset[int]]: ...
 
 
 class RatingPeriodRepository(Protocol):

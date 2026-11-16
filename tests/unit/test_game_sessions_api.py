@@ -39,8 +39,10 @@ from pingstats.modules.matches.domain import (
     MatchSet,
     MatchStatus,
 )
+from pingstats.modules.ratings.dependencies import get_rating_query_repository
 from pingstats.modules.users.dependencies import get_user_repository
 from pingstats.modules.users.domain import User
+from tests.unit.test_rating_queries import QueryRepository
 
 SECRET = "test-secret-that-is-at-least-32-characters-long"
 
@@ -270,6 +272,11 @@ def configured_app(fixture: SessionApiFixture, service) -> object:
     app.dependency_overrides[get_game_sessions_uow] = lambda: object()
     app.dependency_overrides[get_game_session_repository] = lambda: object()
     app.dependency_overrides[get_game_session_match_repository] = lambda: object()
+    app.dependency_overrides[get_rating_query_repository] = lambda: QueryRepository(
+        published_match_versions={
+            fixture.completed.match.id: frozenset({fixture.completed.match.version})
+        }
+    )
     return app
 
 
@@ -367,6 +374,10 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
     assert len(queue.json()["current_pair"]) == 2
     assert queue.json()["waiting"] == []
     assert [item["sequence_number"] for item in matches.json()["items"]] == [1, 2]
+    assert [item["rating_state"] for item in matches.json()["items"]] == [
+        "rated",
+        "not_applicable",
+    ]
     assert statistics.json()["items"][0] == {
         "user": statistics.json()["items"][0]["user"],
         "wins": 1,
@@ -376,6 +387,7 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
         "point_difference": 6,
     }
     assert current.json()["id"] == str(fixture.current.match.id)
+    assert current.json()["rating_state"] == "not_applicable"
     assert [action for action, _ in service.actions] == [
         "create",
         "join",
@@ -437,6 +449,8 @@ async def test_result_retry_cancel_and_paused_responses() -> None:
     assert recorded.status_code == 200
     assert recorded.json() == replayed.json()
     assert recorded.json()["match"]["winner_id"] == str(fixture.organizer.id)
+    assert recorded.json()["match"]["rating_state"] == "rated"
+    assert recorded.json()["current_match"]["rating_state"] == "not_applicable"
     assert recorded.json()["current_match"]["id"] == str(fixture.current.match.id)
     assert cancelled.status_code == 200
     assert left.json()["current_match"] is None

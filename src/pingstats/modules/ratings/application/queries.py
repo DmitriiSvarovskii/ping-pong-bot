@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import cast
 from uuid import UUID
@@ -27,6 +27,7 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True, slots=True)
 class CurrentRatingView:
     user_id: UUID
+    position: int
     rating: Decimal
     rd: Decimal
     effective_rd: Decimal
@@ -68,14 +69,15 @@ class RatingQueryService:
         stored = await repository.get_current(user_id)
         if stored is None:
             raise RatingNotFoundError
-        rating, period = stored
-        return self.project_current(rating, period, at=self.read_time())
+        rating, period, position = stored
+        return self.project_current(rating, period, position=position, at=self.read_time())
 
     @staticmethod
     def project_current(
         rating: PublishedRating,
         period: RatingPeriod,
         *,
+        position: int,
         at: datetime,
     ) -> CurrentRatingView:
         if rating.as_of_period_id is None or rating.as_of_period_id != period.id:
@@ -96,6 +98,7 @@ class RatingQueryService:
         )
         return CurrentRatingView(
             user_id=rating.user_id,
+            position=position,
             rating=rating.rating,
             rd=rating.rd,
             effective_rd=Decimal(str(effective.rd)).quantize(
@@ -116,11 +119,15 @@ class RatingQueryService:
         *,
         limit: int,
         offset: int,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> tuple[tuple[RatingHistoryView, ...], int]:
         rows, total = await repository.list_history(
             user_id,
             limit=limit,
             offset=offset,
+            from_date=from_date,
+            to_date=to_date,
         )
         return (
             tuple(

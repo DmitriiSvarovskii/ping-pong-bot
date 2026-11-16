@@ -37,6 +37,10 @@ from pingstats.modules.ratings.application.errors import (
     UnsupportedRatingAlgorithmError,
 )
 from pingstats.modules.ratings.application.intake import RatingMatchInputRecorder
+from pingstats.modules.ratings.application.match_state import (
+    MatchRatingState,
+    RatingMatchStateService,
+)
 from pingstats.modules.ratings.application.persistence import RatingPeriodResultPersister
 from pingstats.modules.ratings.application.publisher import RatingPeriodPublisher
 from pingstats.modules.ratings.application.queries import (
@@ -48,6 +52,12 @@ from pingstats.modules.ratings.application.rebuild import RatingRebuildExecutor
 from pingstats.modules.ratings.application.rebuild_orchestration import (
     RatingRebuildOrchestrator,
 )
+from pingstats.modules.ratings.application.status import (
+    RatingStatusFacts,
+    RatingStatusService,
+    RatingStatusView,
+    RatingUpdateState,
+)
 from pingstats.modules.ratings.application.workflow import RatingWorkflowOrchestrator
 
 __all__ = [
@@ -55,6 +65,7 @@ __all__ = [
     "CalculatedPlayerRating",
     "CurrentRatingView",
     "InvalidRatingMatchError",
+    "MatchRatingState",
     "RatingBackfillBlockedError",
     "RatingBackfillConflictError",
     "RatingBackfillReport",
@@ -67,6 +78,7 @@ __all__ = [
     "RatingHistoricalBackfill",
     "RatingInputConflictError",
     "RatingMatchInputRecorder",
+    "RatingMatchStateService",
     "RatingHistoryView",
     "RatingNotFoundError",
     "RatingPeriodCalculation",
@@ -86,6 +98,10 @@ __all__ = [
     "RatingRebuildExecutionError",
     "RatingRebuildExecutor",
     "RatingRebuildOrchestrator",
+    "RatingStatusFacts",
+    "RatingStatusService",
+    "RatingStatusView",
+    "RatingUpdateState",
     "RatingWorkflowOrchestrator",
     "UnsupportedRatingAlgorithmError",
 ]

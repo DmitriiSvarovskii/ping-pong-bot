@@ -17,6 +17,7 @@ from fastapi import (
 
 from pingstats.modules.auth.dependencies import get_current_user
 from pingstats.modules.game_sessions.application import GameSessionService
+from pingstats.modules.game_sessions.application.dto import GameSessionMatchResult
 from pingstats.modules.game_sessions.application.errors import (
     GameSessionNotFoundError,
     GameSessionPermissionError,
@@ -60,7 +61,14 @@ from pingstats.modules.game_sessions.schemas import (
     SessionVoidMatchRequest,
     WebSocketTicketResponse,
 )
+from pingstats.modules.matches.application.dto import MatchView
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
+from pingstats.modules.ratings.application.match_state import RatingMatchStateService
+from pingstats.modules.ratings.dependencies import (
+    get_rating_match_state_service,
+    get_rating_query_repository,
+)
+from pingstats.modules.ratings.infrastructure.repository import SqlAlchemyRatingQueryRepository
 from pingstats.modules.users.domain import User
 
 game_sessions_router = APIRouter(
@@ -74,6 +82,44 @@ game_sessions_router = APIRouter(
         409: {"description": "Session state, current match, or version conflict"},
     },
 )
+
+RatingRepositoryDependency = Annotated[
+    SqlAlchemyRatingQueryRepository,
+    Depends(get_rating_query_repository),
+]
+RatingStateServiceDependency = Annotated[
+    RatingMatchStateService,
+    Depends(get_rating_match_state_service),
+]
+
+
+async def _session_match_responses(
+    views: tuple[MatchView, ...],
+    repository: SqlAlchemyRatingQueryRepository,
+    service: RatingMatchStateService,
+) -> list[SessionMatchResponse]:
+    states = await service.get_states(repository, tuple(view.match for view in views))
+    return [
+        SessionMatchResponse.from_view(view, rating_state=states[view.match.id]) for view in views
+    ]
+
+
+async def _session_match_response(
+    view: MatchView,
+    repository: SqlAlchemyRatingQueryRepository,
+    service: RatingMatchStateService,
+) -> SessionMatchResponse:
+    return (await _session_match_responses((view,), repository, service))[0]
+
+
+async def _session_match_command_response(
+    result: GameSessionMatchResult,
+    repository: SqlAlchemyRatingQueryRepository,
+    service: RatingMatchStateService,
+) -> SessionMatchCommandResponse:
+    views = (result.match,) + ((result.current_match,) if result.current_match is not None else ())
+    states = await service.get_states(repository, tuple(view.match for view in views))
+    return SessionMatchCommandResponse.from_result(result, rating_states=dict(states))
 
 
 @game_sessions_router.post(
@@ -362,6 +408,8 @@ async def list_session_matches(
     sessions: Annotated[SqlAlchemyGameSessionRepository, Depends(get_game_session_repository)],
     matches: Annotated[SqlAlchemyMatchRepository, Depends(get_game_session_match_repository)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> SessionMatchListResponse:
@@ -374,7 +422,7 @@ async def list_session_matches(
         offset=offset,
     )
     return SessionMatchListResponse(
-        items=[SessionMatchResponse.from_view(item) for item in items],
+        items=await _session_match_responses(tuple(items), rating_repository, rating_states),
         total=total,
         limit=limit,
         offset=offset,
@@ -391,6 +439,8 @@ async def correct_session_match_result(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchResponse:
     view, _ = await service.correct_session_match(
         uow,
@@ -401,7 +451,7 @@ async def correct_session_match_result(
         expected_version=payload.expected_version,
         reason=payload.reason,
     )
-    return SessionMatchResponse.from_view(view)
+    return await _session_match_response(view, rating_repository, rating_states)
 
 
 @game_sessions_router.post(
@@ -414,6 +464,8 @@ async def void_session_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchResponse:
     view, _ = await service.void_session_match(
         uow,
@@ -423,7 +475,7 @@ async def void_session_match(
         expected_version=payload.expected_version,
         reason=payload.reason,
     )
-    return SessionMatchResponse.from_view(view)
+    return await _session_match_response(view, rating_repository, rating_states)
 
 
 @game_sessions_router.get("/{session_id}/statistics", response_model=SessionStatisticsResponse)
@@ -452,11 +504,13 @@ async def get_current_match(
     sessions: Annotated[SqlAlchemyGameSessionRepository, Depends(get_game_session_repository)],
     matches: Annotated[SqlAlchemyMatchRepository, Depends(get_game_session_match_repository)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchResponse:
     view = await service.get_current_session_match(
         sessions, matches, actor_id=current_user.id, session_id=session_id
     )
-    return SessionMatchResponse.from_view(view)
+    return await _session_match_response(view, rating_repository, rating_states)
 
 
 @game_sessions_router.post(
@@ -468,6 +522,8 @@ async def add_current_match_set(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchCommandResponse:
     result = await service.record_session_set(
         uow,
@@ -477,7 +533,7 @@ async def add_current_match_set(
         score=payload.to_domain(),
         expected_version=payload.expected_version,
     )
-    return SessionMatchCommandResponse.from_result(result)
+    return await _session_match_command_response(result, rating_repository, rating_states)
 
 
 @game_sessions_router.put(
@@ -489,6 +545,8 @@ async def record_current_match_result(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchCommandResponse:
     result = await service.record_session_result(
         uow,
@@ -498,7 +556,7 @@ async def record_current_match_result(
         scores=[item.to_domain() for item in payload.sets],
         expected_version=payload.expected_version,
     )
-    return SessionMatchCommandResponse.from_result(result)
+    return await _session_match_command_response(result, rating_repository, rating_states)
 
 
 async def _cancel_current_match(
@@ -509,6 +567,8 @@ async def _cancel_current_match(
     current_user: User,
     uow: SqlAlchemyGameSessionsUnitOfWork,
     service: GameSessionService,
+    rating_repository: SqlAlchemyRatingQueryRepository,
+    rating_states: RatingMatchStateService,
 ) -> SessionMatchCommandResponse:
     handler = service.cancel_current_match_and_leave if leave else service.cancel_current_match
     result = await handler(
@@ -517,7 +577,7 @@ async def _cancel_current_match(
         session_id=session_id,
         match_id=payload.match_id,
     )
-    return SessionMatchCommandResponse.from_result(result)
+    return await _session_match_command_response(result, rating_repository, rating_states)
 
 
 @game_sessions_router.post(
@@ -529,6 +589,8 @@ async def cancel_current_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchCommandResponse:
     return await _cancel_current_match(
         leave=False,
@@ -537,6 +599,8 @@ async def cancel_current_match(
         current_user=current_user,
         uow=uow,
         service=service,
+        rating_repository=rating_repository,
+        rating_states=rating_states,
     )
 
 
@@ -550,6 +614,8 @@ async def cancel_current_match_and_leave(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchCommandResponse:
     return await _cancel_current_match(
         leave=True,
@@ -558,6 +624,8 @@ async def cancel_current_match_and_leave(
         current_user=current_user,
         uow=uow,
         service=service,
+        rating_repository=rating_repository,
+        rating_states=rating_states,
     )
 
 
@@ -571,6 +639,8 @@ async def skip_current_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyGameSessionsUnitOfWork, Depends(get_game_sessions_uow)],
     service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> SessionMatchCommandResponse:
     result = await service.skip_current_match(
         uow,
@@ -580,4 +650,4 @@ async def skip_current_match(
         skipped_player_id=payload.skipped_player_id,
         skip_both=payload.skip_both,
     )
-    return SessionMatchCommandResponse.from_result(result)
+    return await _session_match_command_response(result, rating_repository, rating_states)

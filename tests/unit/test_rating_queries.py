@@ -1,6 +1,7 @@
 """Application tests for read-only published rating queries."""
 
-from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -8,6 +9,7 @@ import pytest
 
 from pingstats.modules.ratings.application.errors import RatingNotFoundError
 from pingstats.modules.ratings.application.queries import RatingQueryService
+from pingstats.modules.ratings.application.status import RatingStatusFacts
 from pingstats.modules.ratings.domain import (
     Glicko2Parameters,
     Glicko2Strategy,
@@ -73,31 +75,62 @@ def make_result(user_id: UUID, period: RatingPeriod) -> RatingPeriodResult:
 class QueryRepository:
     def __init__(
         self,
-        current: tuple[PublishedRating, RatingPeriod] | None = None,
+        current: tuple[PublishedRating, RatingPeriod, int] | None = None,
         history: tuple[tuple[RatingPeriodResult, RatingPeriod], ...] = (),
+        status: RatingStatusFacts | None = None,
+        published_match_versions: Mapping[UUID, frozenset[int]] | None = None,
     ) -> None:
         self.current = current
         self.history = history
         self.last_page: tuple[int, int] | None = None
+        self.last_dates: tuple[date | None, date | None] | None = None
+        self.status = status or RatingStatusFacts(0, False, None, False)
+        self.published_match_versions = dict(published_match_versions or {})
+        self.published_match_version_calls = 0
 
-    async def get_current(self, user_id: UUID) -> tuple[PublishedRating, RatingPeriod] | None:
+    async def get_current(self, user_id: UUID) -> tuple[PublishedRating, RatingPeriod, int] | None:
         if self.current is None or self.current[0].user_id != user_id:
             return None
         return self.current
 
     async def list_history(
-        self, user_id: UUID, *, limit: int, offset: int
+        self,
+        user_id: UUID,
+        *,
+        limit: int,
+        offset: int,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> tuple[tuple[tuple[RatingPeriodResult, RatingPeriod], ...], int]:
         self.last_page = (limit, offset)
+        self.last_dates = (from_date, to_date)
         matching = tuple(row for row in self.history if row[0].user_id == user_id)
+        if from_date is not None:
+            matching = tuple(row for row in matching if row[1].starts_at.date() >= from_date)
+        if to_date is not None:
+            matching = tuple(row for row in matching if row[1].starts_at.date() <= to_date)
         return matching[offset : offset + limit], len(matching)
+
+    async def get_status(self, user_id: UUID, *, at: datetime) -> RatingStatusFacts:
+        del user_id, at
+        return self.status
+
+    async def get_published_match_versions(
+        self, match_ids: Sequence[UUID]
+    ) -> Mapping[UUID, frozenset[int]]:
+        self.published_match_version_calls += 1
+        return {
+            match_id: self.published_match_versions[match_id]
+            for match_id in match_ids
+            if match_id in self.published_match_versions
+        }
 
 
 async def test_current_rating_applies_completed_calendar_inactivity_without_writes() -> None:
     user_id = uuid4()
     period = make_period()
     stored = make_rating(user_id, period)
-    repository = QueryRepository((stored, period))
+    repository = QueryRepository((stored, period, 4))
     service = RatingQueryService(clock=lambda: datetime(2026, 11, 14, 12, tzinfo=UTC))
 
     view = await service.get_current(repository, user_id)
@@ -106,10 +139,11 @@ async def test_current_rating_applies_completed_calendar_inactivity_without_writ
         RatingState(rating=1612.5, rd=75.0, volatility=0.06), periods=3
     )
     assert view.rating == stored.rating
+    assert view.position == 4
     assert view.rd == stored.rd
     assert view.effective_rd == Decimal(str(expected.rd)).quantize(Decimal("0.00001"))
     assert view.inactivity_periods == 3
-    assert repository.current == (stored, period)
+    assert repository.current == (stored, period, 4)
 
 
 async def test_current_rating_has_no_inactivity_before_next_utc_boundary() -> None:
@@ -118,7 +152,7 @@ async def test_current_rating_has_no_inactivity_before_next_utc_boundary() -> No
     service = RatingQueryService(clock=lambda: datetime(2026, 11, 11, 23, 59, tzinfo=UTC))
 
     view = await service.get_current(
-        QueryRepository((make_rating(user_id, period), period)), user_id
+        QueryRepository((make_rating(user_id, period), period, 1)), user_id
     )
 
     assert view.inactivity_periods == 0
@@ -146,3 +180,42 @@ async def test_history_is_paginated_and_empty_history_is_valid() -> None:
     assert repository.last_page == (1, 1)
     assert empty == ()
     assert empty_total == 0
+
+
+async def test_history_date_boundaries_are_inclusive_and_filter_before_pagination() -> None:
+    user_id = uuid4()
+    periods = tuple(make_period(day) for day in (7, 8, 9, 10, 11))
+    repository = QueryRepository(
+        history=tuple((make_result(user_id, period), period) for period in reversed(periods))
+    )
+
+    history, total = await RatingQueryService.list_history(
+        repository,
+        user_id,
+        limit=1,
+        offset=1,
+        from_date=date(2026, 11, 8),
+        to_date=date(2026, 11, 10),
+    )
+    from_only, from_total = await RatingQueryService.list_history(
+        repository,
+        user_id,
+        limit=20,
+        offset=0,
+        from_date=date(2026, 11, 10),
+    )
+    to_only, to_total = await RatingQueryService.list_history(
+        repository,
+        user_id,
+        limit=20,
+        offset=0,
+        to_date=date(2026, 11, 8),
+    )
+
+    assert total == 3
+    assert [item.period_id for item in history] == [periods[2].id]
+    assert repository.last_dates == (None, date(2026, 11, 8))
+    assert from_total == 2
+    assert [item.period_id for item in from_only] == [periods[4].id, periods[3].id]
+    assert to_total == 2
+    assert [item.period_id for item in to_only] == [periods[1].id, periods[0].id]

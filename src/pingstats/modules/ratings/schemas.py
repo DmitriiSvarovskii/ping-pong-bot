@@ -5,16 +5,18 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pingstats.modules.ratings.application.queries import (
     CurrentRatingView,
     RatingHistoryView,
 )
+from pingstats.modules.ratings.application.status import RatingStatusView, RatingUpdateState
 
 
 class CurrentRatingResponse(BaseModel):
     user_id: UUID
+    position: int
     rating: Decimal
     rd: Decimal
     effective_rd: Decimal
@@ -27,6 +29,16 @@ class CurrentRatingResponse(BaseModel):
 
     @classmethod
     def from_view(cls, view: CurrentRatingView) -> "CurrentRatingResponse":
+        return cls(**asdict(view))
+
+
+class RatingStatusResponse(BaseModel):
+    state: RatingUpdateState
+    pending_matches_count: int = Field(ge=0)
+    next_calculation_at: datetime
+
+    @classmethod
+    def from_view(cls, view: RatingStatusView) -> "RatingStatusResponse":
         return cls(**asdict(view))
 
 

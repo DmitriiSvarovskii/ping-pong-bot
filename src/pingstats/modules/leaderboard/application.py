@@ -81,7 +81,12 @@ class LeaderboardService:
         )
 
     def _to_view(self, row: RankedRating, *, at: datetime) -> LeaderboardPlayerView:
-        projected = self._rating_queries.project_current(row.rating, row.period, at=at)
+        projected = self._rating_queries.project_current(
+            row.rating,
+            row.period,
+            position=row.position,
+            at=at,
+        )
         return LeaderboardPlayerView(
             position=row.position,
             user_id=row.user.id,

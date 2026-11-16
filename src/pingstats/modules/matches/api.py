@@ -1,5 +1,6 @@
 """Authenticated standalone match API."""
 
+from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from pingstats.modules.auth.dependencies import get_current_user
 from pingstats.modules.matches.application import MatchService
+from pingstats.modules.matches.application.dto import MatchView
 from pingstats.modules.matches.dependencies import (
     get_match_repository,
     get_match_service,
@@ -26,9 +28,41 @@ from pingstats.modules.matches.schemas import (
     MatchRevisionResponse,
     VoidMatchRequest,
 )
+from pingstats.modules.ratings.application.match_state import RatingMatchStateService
+from pingstats.modules.ratings.dependencies import (
+    get_rating_match_state_service,
+    get_rating_query_repository,
+)
+from pingstats.modules.ratings.infrastructure.repository import SqlAlchemyRatingQueryRepository
 from pingstats.modules.users.domain import User
 
 matches_router = APIRouter(prefix="/matches", tags=["matches"])
+
+RatingRepositoryDependency = Annotated[
+    SqlAlchemyRatingQueryRepository,
+    Depends(get_rating_query_repository),
+]
+RatingStateServiceDependency = Annotated[
+    RatingMatchStateService,
+    Depends(get_rating_match_state_service),
+]
+
+
+async def _match_responses(
+    views: Sequence[MatchView],
+    repository: SqlAlchemyRatingQueryRepository,
+    service: RatingMatchStateService,
+) -> list[MatchResponse]:
+    states = await service.get_states(repository, tuple(view.match for view in views))
+    return [MatchResponse.from_view(view, rating_state=states[view.match.id]) for view in views]
+
+
+async def _match_response(
+    view: MatchView,
+    repository: SqlAlchemyRatingQueryRepository,
+    service: RatingMatchStateService,
+) -> MatchResponse:
+    return (await _match_responses((view,), repository, service))[0]
 
 
 @matches_router.post("", response_model=MatchResponse, status_code=status.HTTP_201_CREATED)
@@ -37,6 +71,8 @@ async def create_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view = await service.create_standalone(
         uow,
@@ -46,7 +82,7 @@ async def create_match(
         sets_to_win=payload.sets_to_win,
         is_ranked=payload.is_ranked,
     )
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.get("", response_model=MatchListResponse)
@@ -54,6 +90,8 @@ async def list_matches(
     current_user: Annotated[User, Depends(get_current_user)],
     repository: Annotated[SqlAlchemyMatchRepository, Depends(get_match_repository)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
     match_status: Annotated[MatchStatus | None, Query(alias="status")] = None,
     context: MatchContext | None = None,
     is_ranked: bool | None = None,
@@ -70,7 +108,7 @@ async def list_matches(
         offset=offset,
     )
     return MatchListResponse(
-        items=[MatchResponse.from_view(item) for item in items],
+        items=await _match_responses(items, rating_repository, rating_states),
         total=total,
         limit=limit,
         offset=offset,
@@ -83,9 +121,11 @@ async def get_match(
     current_user: Annotated[User, Depends(get_current_user)],
     repository: Annotated[SqlAlchemyMatchRepository, Depends(get_match_repository)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view = await service.get_match(repository, actor_id=current_user.id, match_id=match_id)
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 async def _transition(
@@ -94,9 +134,12 @@ async def _transition(
     current_user: User,
     uow: SqlAlchemyMatchesUnitOfWork,
     service: MatchService,
+    rating_repository: SqlAlchemyRatingQueryRepository,
+    rating_states: RatingMatchStateService,
 ) -> MatchResponse:
     handler = {"accept": service.accept, "reject": service.reject, "cancel": service.cancel}[action]
-    return MatchResponse.from_view(await handler(uow, actor_id=current_user.id, match_id=match_id))
+    view = await handler(uow, actor_id=current_user.id, match_id=match_id)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.post("/{match_id}/accept", response_model=MatchResponse)
@@ -105,8 +148,12 @@ async def accept_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
-    return await _transition("accept", match_id, current_user, uow, service)
+    return await _transition(
+        "accept", match_id, current_user, uow, service, rating_repository, rating_states
+    )
 
 
 @matches_router.post("/{match_id}/reject", response_model=MatchResponse)
@@ -115,8 +162,12 @@ async def reject_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
-    return await _transition("reject", match_id, current_user, uow, service)
+    return await _transition(
+        "reject", match_id, current_user, uow, service, rating_repository, rating_states
+    )
 
 
 @matches_router.post("/{match_id}/cancel", response_model=MatchResponse)
@@ -125,8 +176,12 @@ async def cancel_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
-    return await _transition("cancel", match_id, current_user, uow, service)
+    return await _transition(
+        "cancel", match_id, current_user, uow, service, rating_repository, rating_states
+    )
 
 
 @matches_router.post("/{match_id}/sets", response_model=MatchResponse)
@@ -136,6 +191,8 @@ async def add_match_set(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view = await service.add_set(
         uow,
@@ -144,7 +201,7 @@ async def add_match_set(
         score=payload.to_domain(),
         expected_version=payload.expected_version,
     )
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.put("/{match_id}/results", response_model=MatchResponse)
@@ -154,6 +211,8 @@ async def record_match_result(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view = await service.record_full_result(
         uow,
@@ -162,7 +221,7 @@ async def record_match_result(
         scores=[item.to_domain() for item in payload.sets],
         expected_version=payload.expected_version,
     )
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.patch("/{match_id}/results", response_model=MatchResponse)
@@ -172,6 +231,8 @@ async def correct_match_result(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view, _ = await service.correct_result(
         uow,
@@ -181,7 +242,7 @@ async def correct_match_result(
         expected_version=payload.expected_version,
         reason=payload.reason,
     )
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.post("/{match_id}/void", response_model=MatchResponse)
@@ -191,6 +252,8 @@ async def void_match(
     current_user: Annotated[User, Depends(get_current_user)],
     uow: Annotated[SqlAlchemyMatchesUnitOfWork, Depends(get_matches_uow)],
     service: Annotated[MatchService, Depends(get_match_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
 ) -> MatchResponse:
     view, _ = await service.void_match(
         uow,
@@ -199,7 +262,7 @@ async def void_match(
         expected_version=payload.expected_version,
         reason=payload.reason,
     )
-    return MatchResponse.from_view(view)
+    return await _match_response(view, rating_repository, rating_states)
 
 
 @matches_router.get("/{match_id}/revisions", response_model=MatchRevisionListResponse)

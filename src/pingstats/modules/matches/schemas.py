@@ -15,6 +15,7 @@ from pingstats.modules.matches.domain import (
     ResultSnapshot,
     SetScore,
 )
+from pingstats.modules.ratings.application.match_state import MatchRatingState
 from pingstats.modules.users.schemas import UserPublicResponse
 
 ScoreValue = Annotated[StrictInt, Field(ge=0, le=32767)]
@@ -83,11 +84,17 @@ class MatchResponse(BaseModel):
     completed_at: datetime | None
     cancelled_at: datetime | None
     version: int
+    rating_state: MatchRatingState
     participants: list[MatchParticipantResponse]
     sets: list[MatchSetResponse]
 
     @classmethod
-    def from_view(cls, view: MatchView) -> "MatchResponse":
+    def from_view(
+        cls,
+        view: MatchView,
+        *,
+        rating_state: MatchRatingState,
+    ) -> "MatchResponse":
         match = view.match
         return cls(
             id=match.id,
@@ -105,6 +112,7 @@ class MatchResponse(BaseModel):
             completed_at=match.completed_at,
             cancelled_at=match.cancelled_at,
             version=match.version,
+            rating_state=rating_state,
             participants=[
                 MatchParticipantResponse(
                     position=participant.position,

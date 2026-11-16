@@ -126,6 +126,20 @@ fields не считаются доверенными. Неверная подп
 | GET | `/matches/{id}/revisions` | Аудит исправлений |
 | POST | `/matches/{id}/void` | Аннулировать completed standalone match (organizer, version) |
 
+Все ответы, содержащие `MatchResponse` (standalone и матчи игровых сессий), включают read-only
+поле `rating_state`: `not_applicable`, `pending`, `rated` или `recalculating`.
+
+- `not_applicable` — матч нерейтинговый либо не находится в `completed`, включая `cancelled` и
+  `voided`;
+- `pending` — текущая версия completed ranked-матча отсутствует в active published history;
+- `rated` — `source_match_version` input активной `published_version` совпадает с текущей версией
+  матча;
+- `recalculating` — active published history содержит предыдущую версию матча, но не текущую.
+
+Shadow inputs не влияют на поле до atomic cutover. Match lists получают состояния одним пакетным
+запросом под shared publication lock; поэтому ответ не смешивает версии до и после publication или
+cutover.
+
 ## 5. Игровые сессии
 
 | Method | Path | Назначение |
@@ -286,8 +300,9 @@ session WebSocket с REST fallback. HTTP 409 считается stale state: п�
 | Method | Path | Назначение |
 |---|---|---|
 | GET | `/ratings/me` | Реализовано; текущий опубликованный рейтинг авторизованного пользователя |
+| GET | `/ratings/me/status` | Реализовано; персональное состояние ожидающего rating workflow |
 | GET | `/ratings/{user_id}` | Реализовано; текущий опубликованный рейтинг игрока |
-| GET | `/ratings/{user_id}/history` | Реализовано; active published history, `limit` 1…100, `offset >= 0` |
+| GET | `/ratings/{user_id}/history` | Реализовано; active published history, `limit` 1…100, `offset >= 0`, optional inclusive `from_date`/`to_date` (`YYYY-MM-DD`, UTC period start date) |
 | GET | `/rating-periods` | Опубликованные периоды |
 | POST | `/rating-periods/run-due` | Только development; вручную вызвать тот же идемпотентный catch-up, что scheduler; production 404 |
 | GET | `/leaderboard` | Реализовано; глобальный рейтинг, `limit` 1…100, `offset >= 0` |
@@ -304,6 +319,7 @@ Production administrative endpoints закрытия/пересчёта пери
 ```json
 {
   "user_id": "uuid",
+  "position": 27,
   "rating": "1612.50000",
   "rd": "75.00000",
   "effective_rd": "77.14221",
@@ -315,6 +331,35 @@ Production administrative endpoints закрытия/пересчёта пери
   "updated_at": "2026-11-11T00:05:00Z"
 }
 ```
+
+`position` — абсолютная позиция игрока, начиная с `1`, во всей active published таблице. Она
+вычисляется PostgreSQL независимо от pagination по тому же общему выражению, что leaderboard:
+rating DESC, stored RD ASC, `rated_matches_count` DESC, UUID ASC. Current rating и position читаются
+под одним shared publication lock, поэтому atomic cutover не создаёт смешанного ответа.
+
+`GET /ratings/me/status` доступен и пользователю без опубликованного рейтинга:
+
+```json
+{
+  "state": "pending",
+  "pending_matches_count": 2,
+  "next_calculation_at": "2026-11-17T00:05:00Z"
+}
+```
+
+`pending_matches_count` считает завершённые ranked-матчи пользователя, текущая версия результата
+которых ещё не представлена input соответствующей active `published_version`; cancelled, voided и
+unranked исключаются. Shadow inputs не считаются публикацией и не создают дубликаты, поскольку
+источником списка служат уникальные matches. `next_calculation_at` — ближайшие будущие `00:05 UTC`,
+а не SLA публикации.
+
+Состояния имеют строгий приоритет `delayed > rebuilding > calculating > pending > up_to_date`.
+`delayed` означает персонально затрагивающий failed rebuild, просроченный open/missing/failed
+period либо `calculating`, не завершившийся к следующим суточным `00:05 UTC`; `rebuilding`
+показывается только если checkpoints затрагивают input/result пользователя или
+переносят его опубликованный rating в более поздний период. `calculating` означает затрагивающий
+пользователя period в расчёте. Ответ формируется под shared publication lock и не содержит IDs или
+внутренних ошибок rebuild.
 
 `rating`, `rd` и `volatility` — сохранённое состояние последней active published версии.
 `effective_rd` — read-only projection того же состояния после одного Glicko-2 inactivity step за
@@ -346,6 +391,10 @@ Production administrative endpoints закрытия/пересчёта пери
   "offset": 0
 }
 ```
+
+`from_date` и `to_date` фильтруют UTC-дату `period_starts_at` включительно и могут передаваться
+независимо. Фильтр применяется до `total`, сортировки и pagination. Диапазон `from_date > to_date`
+и дата не в формате `YYYY-MM-DD` возвращают `422`; отсутствие параметров сохраняет прежний контракт.
 
 История выбирает result только с `calculation_version = rating_periods.published_version`; shadow
 versions rebuild не видны. Shared PostgreSQL publication lock не позволяет одному response увидеть

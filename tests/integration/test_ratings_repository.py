@@ -4,7 +4,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -38,6 +38,11 @@ from pingstats.modules.ratings.application import (
     UnsupportedRatingAlgorithmError,
 )
 from pingstats.modules.ratings.application.backfill import RatingHistoricalBackfill
+from pingstats.modules.ratings.application.match_state import (
+    MatchRatingState,
+    RatingMatchStateService,
+)
+from pingstats.modules.ratings.application.status import RatingStatusService, RatingUpdateState
 from pingstats.modules.ratings.domain import (
     PublishedRating,
     RatingPeriod,
@@ -1951,11 +1956,20 @@ async def test_rating_queries_expose_only_active_versions_with_stable_pagination
         second_page, repeated_total = await queries.list_history(
             fixture.first_user_id, limit=2, offset=2
         )
+        filtered_page, filtered_total = await queries.list_history(
+            fixture.first_user_id,
+            limit=1,
+            offset=1,
+            from_date=date(2114, 1, 2),
+            to_date=date(2114, 1, 3),
+        )
 
     assert current is not None and current[1].id == periods[-1].id
     assert total == repeated_total == 3
     assert [period.id for _, period in first_page] == [periods[2].id, periods[1].id]
     assert [period.id for _, period in second_page] == [periods[0].id]
+    assert filtered_total == 2
+    assert [period.id for _, period in filtered_page] == [periods[1].id]
     assert {result.calculation_version for result, _ in first_page + second_page} == {1}
     assert {result.rating_after for result, _ in first_page + second_page} == {
         Decimal("1510.00000"),
@@ -1964,15 +1978,313 @@ async def test_rating_queries_expose_only_active_versions_with_stable_pagination
     }
 
 
-async def test_leaderboard_ranking_pagination_and_current_position(
+async def test_rating_status_tracks_pending_publication_and_personal_rebuild(
     rating_database: RatingFixture,
 ) -> None:
     fixture = rating_database
-    third_user_id, fourth_user_id = uuid4(), uuid4()
+    unrelated_user_id = uuid4()
+    period_start = datetime(2114, 2, 1, tzinfo=UTC)
+    before_close = period_start + timedelta(hours=18)
+    after_close = period_start + timedelta(days=1, minutes=6)
+    async with fixture.session_factory() as session:
+        await SqlAlchemyUserRepository(session).create(make_user(unrelated_user_id, "Unrelated"))
+        match = await session.get(MatchModel, fixture.match_id)
+        assert match is not None
+        match.started_at = period_start + timedelta(hours=11)
+        match.completed_at = period_start + timedelta(hours=12)
+        await add_historical_match(
+            session,
+            match_id=uuid4(),
+            first_user_id=fixture.first_user_id,
+            second_user_id=fixture.second_user_id,
+            completed_at=period_start + timedelta(hours=13),
+            is_ranked=False,
+        )
+        await add_historical_match(
+            session,
+            match_id=uuid4(),
+            first_user_id=fixture.first_user_id,
+            second_user_id=fixture.second_user_id,
+            completed_at=period_start + timedelta(hours=14),
+            status=MatchStatus.VOIDED,
+        )
+        cancelled_match_id = uuid4()
+        session.add(
+            MatchModel(
+                id=cancelled_match_id,
+                context=MatchContext.STANDALONE,
+                status=MatchStatus.CANCELLED,
+                created_by=fixture.first_user_id,
+                points_to_win=11,
+                win_by=2,
+                sets_to_win=1,
+                is_ranked=True,
+                winner_id=None,
+                started_at=None,
+                completed_at=None,
+                cancelled_at=period_start + timedelta(hours=15),
+                version=1,
+            )
+        )
+        session.add_all(
+            (
+                MatchParticipantModel(
+                    id=uuid4(),
+                    match_id=cancelled_match_id,
+                    user_id=fixture.first_user_id,
+                    position=1,
+                ),
+                MatchParticipantModel(
+                    id=uuid4(),
+                    match_id=cancelled_match_id,
+                    user_id=fixture.second_user_id,
+                    position=2,
+                ),
+            )
+        )
+        await session.commit()
+
+    async with fixture.session_factory() as session:
+        repository = SqlAlchemyRatingQueryRepository(session)
+        pending = await RatingStatusService(clock=lambda: before_close).get_status(
+            repository, user_id=fixture.first_user_id
+        )
+        unrated = await RatingStatusService(clock=lambda: before_close).get_status(
+            repository, user_id=unrelated_user_id
+        )
+    assert pending.state is RatingUpdateState.PENDING
+    assert pending.pending_matches_count == 1
+    assert unrated.state is RatingUpdateState.UP_TO_DATE
+    assert unrated.pending_matches_count == 0
+
+    async with fixture.session_factory() as session:
+        overdue = await RatingStatusService(clock=lambda: after_close).get_status(
+            SqlAlchemyRatingQueryRepository(session), user_id=fixture.first_user_id
+        )
+    assert overdue.state is RatingUpdateState.DELAYED
+    assert overdue.pending_matches_count == 1
+
+    period = replace(
+        make_period(starts_at=period_start, algorithm_version="2"),
+        status=RatingPeriodStatus.CALCULATING,
+    )
+    async with SqlAlchemyRatingsUnitOfWork(fixture.session_factory) as uow:
+        await uow.periods.add(period)
+        await uow.inputs.add(
+            replace(make_input(fixture, period.id), completed_at=period_start + timedelta(hours=12))
+        )
+        await uow.commit()
+
+    async with fixture.session_factory() as session:
+        calculating = await RatingStatusService(clock=lambda: after_close).get_status(
+            SqlAlchemyRatingQueryRepository(session), user_id=fixture.first_user_id
+        )
+    assert calculating.state is RatingUpdateState.CALCULATING
+    assert calculating.pending_matches_count == 1
+
+    async with fixture.session_factory() as session:
+        stored_period = await session.get(RatingPeriodModel, period.id)
+        assert stored_period is not None
+        stored_period.status = RatingPeriodStatus.PUBLISHED
+        stored_period.calculated_version = 1
+        stored_period.published_version = 1
+        stored_period.published_at = after_close
+        await SqlAlchemyRatingResultRepository(session).add(make_result(fixture, period.id))
+        await SqlAlchemyRatingRepository(session).add(
+            PublishedRating(
+                user_id=fixture.first_user_id,
+                rating=Decimal("1512.34567"),
+                rd=Decimal("290.12345"),
+                volatility=Decimal("0.0599990000"),
+                as_of_period_id=period.id,
+                rated_matches_count=1,
+                updated_at=after_close,
+                version=1,
+            )
+        )
+        await session.commit()
+
+    async with fixture.session_factory() as session:
+        published = await RatingStatusService(clock=lambda: after_close).get_status(
+            SqlAlchemyRatingQueryRepository(session), user_id=fixture.first_user_id
+        )
+    assert published.state is RatingUpdateState.UP_TO_DATE
+    assert published.pending_matches_count == 0
+
+    # A prepared shadow input is not active accounting and must not duplicate a
+    # match that is already represented by the published version.
+    async with SqlAlchemyRatingsUnitOfWork(fixture.session_factory) as uow:
+        await uow.inputs.add(
+            replace(
+                make_input(fixture, period.id, calculation_version=2),
+                completed_at=period_start + timedelta(hours=12),
+            )
+        )
+        await uow.commit()
+
+    job = RatingRebuildJob(
+        id=uuid4(),
+        from_period_id=period.id,
+        through_period_id=period.id,
+        status=RatingRebuildStatus.PENDING,
+        singleton_scope=1,
+        created_at=after_close,
+        started_at=None,
+        ready_at=None,
+        completed_at=None,
+        error_code=None,
+        version=1,
+    )
+    async with SqlAlchemyRatingsUnitOfWork(fixture.session_factory) as uow:
+        await uow.rebuild_jobs.add(job)
+        await uow.rebuild_periods.add(
+            RatingRebuildPeriod(
+                rebuild_job_id=job.id,
+                period_id=period.id,
+                source_version=1,
+                target_version=2,
+                status=RatingRebuildPeriodStatus.PENDING,
+                created_at=after_close,
+                completed_at=None,
+                error_code=None,
+            )
+        )
+        await uow.commit()
+
+    async with fixture.session_factory() as session:
+        repository = SqlAlchemyRatingQueryRepository(session)
+        rebuilding = await RatingStatusService(clock=lambda: after_close).get_status(
+            repository, user_id=fixture.first_user_id
+        )
+        unrelated = await RatingStatusService(clock=lambda: after_close).get_status(
+            repository, user_id=unrelated_user_id
+        )
+    assert rebuilding.state is RatingUpdateState.REBUILDING
+    assert rebuilding.pending_matches_count == 0
+    assert unrelated.state is RatingUpdateState.UP_TO_DATE
+
+    async with SqlAlchemyRatingsUnitOfWork(fixture.session_factory) as uow:
+        failed = await uow.rebuild_jobs.update_status(
+            job_id=job.id,
+            status=RatingRebuildStatus.FAILED,
+            expected_version=1,
+            completed_at=None,
+            error_code="test_failure",
+        )
+        assert failed is not None
+        await uow.commit()
+    async with fixture.session_factory() as session:
+        delayed = await RatingStatusService(clock=lambda: after_close).get_status(
+            SqlAlchemyRatingQueryRepository(session), user_id=fixture.first_user_id
+        )
+    assert delayed.state is RatingUpdateState.DELAYED
+    assert delayed.pending_matches_count == 0
+
+
+async def test_match_rating_state_follows_published_version_shadow_and_void(
+    rating_database: RatingFixture,
+) -> None:
+    fixture = rating_database
+    state_service = RatingMatchStateService()
+
+    async with fixture.session_factory() as session:
+        view = await SqlAlchemyMatchRepository(session).get_view(fixture.match_id)
+        assert view is not None
+        pending = await state_service.get_states(
+            SqlAlchemyRatingQueryRepository(session),
+            (view.match,),
+        )
+    assert pending[fixture.match_id] is MatchRatingState.PENDING
+
+    period_start = datetime(2114, 3, 1, tzinfo=UTC)
+    period = replace(
+        make_period(starts_at=period_start, algorithm_version="2"),
+        status=RatingPeriodStatus.PUBLISHED,
+        calculation_version=2,
+        calculated_version=2,
+        published_version=1,
+        published_at=period_start + timedelta(days=1, minutes=5),
+    )
+    active_input = replace(
+        make_input(fixture, period.id),
+        completed_at=period_start + timedelta(hours=12),
+    )
+    shadow_input = replace(
+        active_input,
+        calculation_version=2,
+        source_match_version=3,
+        result_fingerprint="b" * 64,
+    )
+    async with SqlAlchemyRatingsUnitOfWork(fixture.session_factory) as uow:
+        await uow.periods.add(period)
+        await uow.inputs.add(active_input)
+        await uow.inputs.add(shadow_input)
+        await uow.commit()
+
+    async with fixture.session_factory() as session:
+        view = await SqlAlchemyMatchRepository(session).get_view(fixture.match_id)
+        assert view is not None
+        rated = await state_service.get_states(
+            SqlAlchemyRatingQueryRepository(session),
+            (view.match,),
+        )
+    assert rated[fixture.match_id] is MatchRatingState.RATED
+
+    async with fixture.session_factory() as session:
+        match = await session.get(MatchModel, fixture.match_id)
+        assert match is not None
+        match.version = 3
+        await session.commit()
+    async with fixture.session_factory() as session:
+        view = await SqlAlchemyMatchRepository(session).get_view(fixture.match_id)
+        assert view is not None
+        recalculating = await state_service.get_states(
+            SqlAlchemyRatingQueryRepository(session),
+            (view.match,),
+        )
+    assert recalculating[fixture.match_id] is MatchRatingState.RECALCULATING
+
+    async with fixture.session_factory() as session:
+        stored_period = await session.get(RatingPeriodModel, period.id)
+        assert stored_period is not None
+        stored_period.published_version = 2
+        await session.commit()
+    async with fixture.session_factory() as session:
+        view = await SqlAlchemyMatchRepository(session).get_view(fixture.match_id)
+        assert view is not None
+        after_cutover = await state_service.get_states(
+            SqlAlchemyRatingQueryRepository(session),
+            (view.match,),
+        )
+    assert after_cutover[fixture.match_id] is MatchRatingState.RATED
+
+    async with fixture.session_factory() as session:
+        match = await session.get(MatchModel, fixture.match_id)
+        assert match is not None
+        match.status = MatchStatus.VOIDED
+        match.winner_id = None
+        match.version = 4
+        await session.commit()
+    async with fixture.session_factory() as session:
+        view = await SqlAlchemyMatchRepository(session).get_view(fixture.match_id)
+        assert view is not None
+        voided = await state_service.get_states(
+            SqlAlchemyRatingQueryRepository(session),
+            (view.match,),
+        )
+    assert voided[fixture.match_id] is MatchRatingState.NOT_APPLICABLE
+
+
+async def test_rating_query_positions_match_leaderboard_order_and_tiebreakers(
+    rating_database: RatingFixture,
+) -> None:
+    fixture = rating_database
+    third_user_id, fourth_user_id, fifth_user_id = uuid4(), uuid4(), uuid4()
     async with fixture.session_factory() as session:
         users = SqlAlchemyUserRepository(session)
         await users.create(make_user(third_user_id, "Third"))
         await users.create(make_user(fourth_user_id, "Fourth"))
+        await users.create(make_user(fifth_user_id, "Fifth"))
         await session.commit()
 
     async with fixture.session_factory() as session:
@@ -1994,6 +2306,7 @@ async def test_leaderboard_ranking_pagination_and_current_position(
         published_at=starts_at + timedelta(days=1, minutes=5),
     )
     rating_specs = (
+        (fifth_user_id, "1700.00000", "200.00000", 1),
         (fixture.first_user_id, "1600.00000", "80.00000", 5),
         (fixture.second_user_id, "1600.00000", "70.00000", 3),
         (third_user_id, "1600.00000", "70.00000", 5),
@@ -2017,17 +2330,23 @@ async def test_leaderboard_ranking_pagination_and_current_position(
         await uow.commit()
 
     tied = sorted((third_user_id, fourth_user_id), key=lambda value: value.int)
-    expected = (*tied, fixture.second_user_id, fixture.first_user_id)
+    expected = (fifth_user_id, *tied, fixture.second_user_id, fixture.first_user_id)
     async with fixture.session_factory() as session:
-        page, total, current_position = await SqlAlchemyLeaderboardRepository(session).list_ranked(
-            current_user_id=fixture.first_user_id,
-            limit=2,
-            offset=1,
+        leaderboard = SqlAlchemyLeaderboardRepository(session)
+        page, total, current_position = await leaderboard.list_ranked(
+            current_user_id=fixture.first_user_id, limit=2, offset=1
         )
-    assert total == 4
-    assert current_position == 4
+        rating_queries = SqlAlchemyRatingQueryRepository(session)
+        rating_positions: dict[UUID, int] = {}
+        for user_id in expected:
+            current = await rating_queries.get_current(user_id)
+            assert current is not None
+            rating_positions[user_id] = current[2]
+    assert total == 5
+    assert current_position == 5
     assert [row.position for row in page] == [2, 3]
     assert [row.user.id for row in page] == list(expected[1:3])
+    assert rating_positions == {user_id: position for position, user_id in enumerate(expected, 1)}
 
     async with fixture.session_factory() as session:
         _, _, unrated_position = await SqlAlchemyLeaderboardRepository(session).list_ranked(

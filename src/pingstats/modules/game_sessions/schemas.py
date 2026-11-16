@@ -21,6 +21,7 @@ from pingstats.modules.matches.schemas import (
     SetScoreInput,
     VoidMatchRequest,
 )
+from pingstats.modules.ratings.application.match_state import MatchRatingState
 from pingstats.modules.users.schemas import UserPublicResponse
 
 
@@ -140,12 +141,17 @@ class SessionMatchResponse(MatchResponse):
     sequence_number: int
 
     @classmethod
-    def from_view(cls, view: MatchView) -> "SessionMatchResponse":
+    def from_view(
+        cls,
+        view: MatchView,
+        *,
+        rating_state: MatchRatingState,
+    ) -> "SessionMatchResponse":
         match = view.match
         if match.game_session_id is None or match.sequence_number is None:
             raise ValueError("Expected a game-session match")
         return cls(
-            **MatchResponse.from_view(view).model_dump(),
+            **MatchResponse.from_view(view, rating_state=rating_state).model_dump(),
             game_session_id=match.game_session_id,
             sequence_number=match.sequence_number,
         )
@@ -220,11 +226,22 @@ class SessionMatchCommandResponse(BaseModel):
     queue: SessionQueueResponse | None
 
     @classmethod
-    def from_result(cls, result: GameSessionMatchResult) -> "SessionMatchCommandResponse":
+    def from_result(
+        cls,
+        result: GameSessionMatchResult,
+        *,
+        rating_states: dict[UUID, MatchRatingState],
+    ) -> "SessionMatchCommandResponse":
         return cls(
-            match=SessionMatchResponse.from_view(result.match),
+            match=SessionMatchResponse.from_view(
+                result.match,
+                rating_state=rating_states[result.match.match.id],
+            ),
             current_match=(
-                SessionMatchResponse.from_view(result.current_match)
+                SessionMatchResponse.from_view(
+                    result.current_match,
+                    rating_state=rating_states[result.current_match.match.id],
+                )
                 if result.current_match is not None
                 else None
             ),

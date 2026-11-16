@@ -1,14 +1,19 @@
 """PostgreSQL repositories for versioned rating persistence."""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import DateTime, case, delete, exists, func, or_, select, type_coerce, union, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
+from pingstats.modules.matches.domain import MatchStatus
+from pingstats.modules.matches.infrastructure.models import MatchModel, MatchParticipantModel
+from pingstats.modules.ratings.application.status import RatingStatusFacts
 from pingstats.modules.ratings.domain import (
     PublishedRating,
     RatingPeriod,
@@ -31,6 +36,7 @@ from pingstats.modules.ratings.infrastructure.models import (
     RatingRebuildPeriodModel,
     RatingRecalculationRequestModel,
 )
+from pingstats.modules.ratings.infrastructure.ranking import published_rating_ranking
 
 _RATING_PERIOD_LOCK_NAMESPACE = 1_347_632_210
 _RATING_PUBLICATION_LOCK_NAMESPACE = 1_347_632_211
@@ -130,11 +136,13 @@ class SqlAlchemyRatingQueryRepository:
     async def _acquire_publication_read_lock(self) -> None:
         await acquire_rating_publication_read_lock(self._session)
 
-    async def get_current(self, user_id: UUID) -> tuple[PublishedRating, RatingPeriod] | None:
+    async def get_current(self, user_id: UUID) -> tuple[PublishedRating, RatingPeriod, int] | None:
         await self._acquire_publication_read_lock()
+        ranked = published_rating_ranking(name="current_rating_position")
         row = (
             await self._session.execute(
-                select(RatingModel, RatingPeriodModel)
+                select(RatingModel, RatingPeriodModel, ranked.c.position)
+                .join(ranked, ranked.c.user_id == RatingModel.user_id)
                 .join(RatingPeriodModel, RatingPeriodModel.id == RatingModel.as_of_period_id)
                 .where(
                     RatingModel.user_id == user_id,
@@ -145,8 +153,252 @@ class SqlAlchemyRatingQueryRepository:
         ).one_or_none()
         if row is None:
             return None
-        rating, period = row
-        return rating.to_domain(), period.to_domain()
+        rating, period, position = row
+        return rating.to_domain(), period.to_domain(), int(position)
+
+    async def get_status(self, user_id: UUID, *, at: datetime) -> RatingStatusFacts:
+        await self._acquire_publication_read_lock()
+        eligible_matches = (
+            select(
+                MatchModel.id.label("match_id"),
+                MatchModel.version.label("match_version"),
+                MatchModel.completed_at.label("completed_at"),
+            )
+            .join(MatchParticipantModel, MatchParticipantModel.match_id == MatchModel.id)
+            .where(
+                MatchParticipantModel.user_id == user_id,
+                MatchModel.status == MatchStatus.COMPLETED,
+                MatchModel.is_ranked.is_(True),
+                MatchModel.completed_at.is_not(None),
+            )
+            .cte("eligible_rating_matches")
+        )
+        active_input_exists = exists(
+            select(RatingPeriodMatchInputModel.match_id)
+            .join(
+                RatingPeriodModel,
+                RatingPeriodModel.id == RatingPeriodMatchInputModel.period_id,
+            )
+            .where(
+                RatingPeriodMatchInputModel.match_id == eligible_matches.c.match_id,
+                RatingPeriodMatchInputModel.source_match_version
+                == eligible_matches.c.match_version,
+                RatingPeriodModel.status == RatingPeriodStatus.PUBLISHED,
+                RatingPeriodModel.published_version
+                == RatingPeriodMatchInputModel.calculation_version,
+            )
+        )
+        pending_matches = (
+            select(eligible_matches.c.match_id, eligible_matches.c.completed_at)
+            .where(~active_input_exists)
+            .cte("pending_rating_matches")
+        )
+        pending_period_start = self._utc_period_start(pending_matches.c.completed_at)
+        pending_periods = (
+            select(
+                pending_matches.c.match_id,
+                pending_matches.c.completed_at,
+                RatingPeriodModel.status.label("period_status"),
+            )
+            .outerjoin(RatingPeriodModel, RatingPeriodModel.starts_at == pending_period_start)
+            .cte("pending_rating_periods")
+        )
+        pending_close_at = self._utc_period_start(pending_periods.c.completed_at) + timedelta(
+            days=1, minutes=5
+        )
+        overdue_pending_exists = exists(
+            select(pending_periods.c.match_id).where(
+                pending_close_at <= at,
+                or_(
+                    pending_periods.c.period_status.is_(None),
+                    pending_periods.c.period_status.in_(
+                        (
+                            RatingPeriodStatus.OPEN,
+                            RatingPeriodStatus.FAILED,
+                            RatingPeriodStatus.STALE,
+                        )
+                    ),
+                ),
+            )
+        )
+
+        as_of_period = aliased(RatingPeriodModel, name="status_as_of_period")
+        direct_period_input = exists(
+            select(RatingPeriodMatchInputModel.match_id).where(
+                RatingPeriodMatchInputModel.period_id == RatingPeriodModel.id,
+                RatingPeriodMatchInputModel.calculation_version
+                == RatingPeriodModel.calculation_version,
+                or_(
+                    RatingPeriodMatchInputModel.player1_id == user_id,
+                    RatingPeriodMatchInputModel.player2_id == user_id,
+                ),
+            )
+        )
+        carried_rating = exists(
+            select(RatingModel.user_id)
+            .join(as_of_period, as_of_period.id == RatingModel.as_of_period_id)
+            .where(
+                RatingModel.user_id == user_id,
+                RatingPeriodModel.starts_at > as_of_period.starts_at,
+            )
+        )
+        period_affects_user = or_(direct_period_input, carried_rating)
+        calculating_exists = exists(
+            select(RatingPeriodModel.id).where(
+                RatingPeriodModel.status == RatingPeriodStatus.CALCULATING,
+                period_affects_user,
+            )
+        )
+        delayed_period_exists = exists(
+            select(RatingPeriodModel.id).where(
+                period_affects_user,
+                or_(
+                    RatingPeriodModel.status.in_(
+                        (RatingPeriodStatus.FAILED, RatingPeriodStatus.STALE)
+                    ),
+                    (
+                        (RatingPeriodModel.status == RatingPeriodStatus.OPEN)
+                        & (RatingPeriodModel.ends_at + timedelta(minutes=5) <= at)
+                    ),
+                    (
+                        (RatingPeriodModel.status == RatingPeriodStatus.CALCULATING)
+                        & (RatingPeriodModel.ends_at + timedelta(days=1, minutes=5) <= at)
+                    ),
+                ),
+            )
+        )
+
+        result_jobs = (
+            select(RatingRebuildPeriodModel.rebuild_job_id.label("job_id"))
+            .join(
+                RatingPeriodResultModel,
+                (RatingPeriodResultModel.period_id == RatingRebuildPeriodModel.period_id)
+                & or_(
+                    RatingPeriodResultModel.calculation_version
+                    == RatingRebuildPeriodModel.source_version,
+                    RatingPeriodResultModel.calculation_version
+                    == RatingRebuildPeriodModel.target_version,
+                ),
+            )
+            .where(RatingPeriodResultModel.user_id == user_id)
+        )
+        input_jobs = (
+            select(RatingRebuildPeriodModel.rebuild_job_id.label("job_id"))
+            .join(
+                RatingPeriodMatchInputModel,
+                (RatingPeriodMatchInputModel.period_id == RatingRebuildPeriodModel.period_id)
+                & or_(
+                    RatingPeriodMatchInputModel.calculation_version
+                    == RatingRebuildPeriodModel.source_version,
+                    RatingPeriodMatchInputModel.calculation_version
+                    == RatingRebuildPeriodModel.target_version,
+                ),
+            )
+            .where(
+                or_(
+                    RatingPeriodMatchInputModel.player1_id == user_id,
+                    RatingPeriodMatchInputModel.player2_id == user_id,
+                )
+            )
+        )
+        request_jobs = (
+            select(RatingRecalculationRequestModel.rebuild_job_id.label("job_id"))
+            .join(
+                MatchParticipantModel,
+                MatchParticipantModel.match_id
+                == RatingRecalculationRequestModel.caused_by_match_id,
+            )
+            .where(
+                RatingRecalculationRequestModel.rebuild_job_id.is_not(None),
+                MatchParticipantModel.user_id == user_id,
+            )
+        )
+        checkpoint_period = aliased(RatingPeriodModel, name="status_checkpoint_period")
+        rebuild_as_of_period = aliased(RatingPeriodModel, name="status_rebuild_as_of_period")
+        carried_jobs = (
+            select(RatingRebuildPeriodModel.rebuild_job_id.label("job_id"))
+            .join(
+                checkpoint_period,
+                checkpoint_period.id == RatingRebuildPeriodModel.period_id,
+            )
+            .join(RatingModel, RatingModel.user_id == user_id)
+            .join(rebuild_as_of_period, rebuild_as_of_period.id == RatingModel.as_of_period_id)
+            .where(checkpoint_period.starts_at > rebuild_as_of_period.starts_at)
+        )
+        affected_jobs = union(result_jobs, input_jobs, request_jobs, carried_jobs).cte(
+            "user_affected_rebuild_jobs"
+        )
+        rebuild_status = (
+            select(RatingRebuildJobModel.status)
+            .join(affected_jobs, affected_jobs.c.job_id == RatingRebuildJobModel.id)
+            .where(RatingRebuildJobModel.status.in_(_ACTIVE_REBUILD_STATUSES))
+            .order_by(
+                case(
+                    (RatingRebuildJobModel.status == RatingRebuildStatus.FAILED, 0),
+                    else_=1,
+                ),
+                RatingRebuildJobModel.created_at,
+                RatingRebuildJobModel.id,
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
+        pending_count = select(func.count()).select_from(pending_matches).scalar_subquery()
+        row = (
+            await self._session.execute(
+                select(
+                    pending_count.label("pending_matches_count"),
+                    calculating_exists.label("has_calculating"),
+                    (overdue_pending_exists | delayed_period_exists).label("has_delayed_period"),
+                    rebuild_status.label("rebuild_status"),
+                )
+            )
+        ).one()
+        return RatingStatusFacts(
+            pending_matches_count=int(row.pending_matches_count),
+            has_calculating=bool(row.has_calculating),
+            rebuild_status=row.rebuild_status,
+            has_delayed_period=bool(row.has_delayed_period),
+        )
+
+    async def get_published_match_versions(
+        self, match_ids: Sequence[UUID]
+    ) -> dict[UUID, frozenset[int]]:
+        if not match_ids:
+            return {}
+        await self._acquire_publication_read_lock()
+        rows = (
+            await self._session.execute(
+                select(
+                    RatingPeriodMatchInputModel.match_id,
+                    RatingPeriodMatchInputModel.source_match_version,
+                )
+                .join(
+                    RatingPeriodModel,
+                    RatingPeriodModel.id == RatingPeriodMatchInputModel.period_id,
+                )
+                .where(
+                    RatingPeriodMatchInputModel.match_id.in_(match_ids),
+                    RatingPeriodModel.status == RatingPeriodStatus.PUBLISHED,
+                    RatingPeriodModel.published_version
+                    == RatingPeriodMatchInputModel.calculation_version,
+                )
+            )
+        ).all()
+        versions: dict[UUID, set[int]] = {}
+        for match_id, source_match_version in rows:
+            versions.setdefault(match_id, set()).add(source_match_version)
+        return {
+            match_id: frozenset(source_versions) for match_id, source_versions in versions.items()
+        }
+
+    @staticmethod
+    def _utc_period_start(value: ColumnElement[datetime]) -> ColumnElement[datetime]:
+
+        return type_coerce(
+            func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", value))),
+            DateTime(timezone=True),
+        )
 
     async def list_history(
         self,
@@ -154,17 +406,27 @@ class SqlAlchemyRatingQueryRepository:
         *,
         limit: int,
         offset: int,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> tuple[Sequence[tuple[RatingPeriodResult, RatingPeriod]], int]:
         await self._acquire_publication_read_lock()
         join_condition = (RatingPeriodResultModel.period_id == RatingPeriodModel.id) & (
             RatingPeriodResultModel.calculation_version == RatingPeriodModel.published_version
         )
-        filters = (
+        filters = [
             RatingPeriodResultModel.user_id == user_id,
             RatingPeriodModel.status == RatingPeriodStatus.PUBLISHED,
             RatingPeriodModel.published_version.is_not(None),
             RatingPeriodModel.published_at.is_not(None),
-        )
+        ]
+        if from_date is not None:
+            filters.append(
+                RatingPeriodModel.starts_at >= datetime.combine(from_date, time.min, tzinfo=UTC)
+            )
+        if to_date is not None:
+            filters.append(
+                RatingPeriodModel.starts_at <= datetime.combine(to_date, time.max, tzinfo=UTC)
+            )
         total = await self._session.scalar(
             select(func.count())
             .select_from(RatingPeriodResultModel)
