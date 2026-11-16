@@ -1,12 +1,12 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef } from 'react'
 
-import { ApiError } from '../api/client'
 import { getLeaderboard, getMyRating } from '../api/ratings'
 import { useAuth } from '../auth/AuthProvider'
 import { ErrorPanel, LoadingPanel } from '../components/SessionUi'
 import { UserIcon } from '../components/icons'
 import { getDisplayName } from '../hooks/useDisplayName'
+import { isRatingNotFound } from '../ratings/errors'
 import { formatRating, formatRatingPosition } from '../ratings/formatters'
 import { ratingKeys } from '../ratings/queryKeys'
 import type {
@@ -25,7 +25,7 @@ export function RatingPage() {
   const current = useQuery({
     queryKey: ratingKeys.current(userId),
     queryFn: ({ signal }) => getMyRating(apiClient, signal),
-    retry: (failureCount, error) => !isMissingRating(error) && failureCount < 1,
+    retry: (failureCount, error) => !isRatingNotFound(error) && failureCount < 1,
   })
   const leaderboard = useInfiniteQuery({
     queryKey: ratingKeys.leaderboard(userId),
@@ -149,7 +149,7 @@ function CurrentRatingCard({
       </div>
     )
   }
-  if (isMissingRating(error)) {
+  if (isRatingNotFound(error)) {
     return (
       <div className="rating-summary-card rating-summary-empty" aria-label="Ваш рейтинг">
         <strong>Сыграйте первый рейтинговый матч</strong>
@@ -214,8 +214,4 @@ function mergeLeaderboard(pages: LeaderboardResponse[]): LeaderboardItem[] {
     }
   }
   return [...unique.values()]
-}
-
-function isMissingRating(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404 && error.code === 'rating_not_found'
 }
