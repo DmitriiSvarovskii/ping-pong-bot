@@ -5,7 +5,7 @@ import {
   getRatingReliability,
 } from './formatters'
 import type { CurrentRating } from '../types/ratings'
-
+import { RatingInfo } from './RatingInfo'
 interface RatingSummaryProps {
   rating?: CurrentRating
   loading?: boolean
@@ -36,7 +36,10 @@ export function RatingSummary({
   if (missing) {
     return (
       <section className="profile-rating-summary profile-rating-state" aria-label="Рейтинг">
-        <strong>{emptyTitle}</strong>
+        <div className="rating-title-row">
+          <strong>{emptyTitle}</strong>
+          <RatingInfo />
+        </div>
         {emptyDescription && <p>{emptyDescription}</p>}
       </section>
     )
@@ -44,7 +47,10 @@ export function RatingSummary({
   if (error || !rating) {
     return (
       <section className="profile-rating-summary profile-rating-state" aria-label="Рейтинг">
-        <strong>Не удалось загрузить рейтинг</strong>
+        <div className="rating-title-row">
+  <strong>Не удалось загрузить рейтинг</strong>
+  <RatingInfo />
+</div>
         <p>Проверьте соединение и попробуйте снова.</p>
         {onRetry && <button className="secondary-button" onClick={onRetry}>Повторить</button>}
       </section>
@@ -56,7 +62,10 @@ export function RatingSummary({
     <section className="profile-rating-summary" aria-labelledby="profile-rating-title">
       <div className="profile-rating-heading">
         <div>
-          <span id="profile-rating-title">Рейтинг</span>
+          <div className="rating-title-row">
+  <span id="profile-rating-title">Рейтинг</span>
+  <RatingInfo />
+</div>
           <strong>{formatRating(rating.rating)}</strong>
         </div>
         <span className={`rating-reliability reliability-${reliability ?? 'unknown'}`}>

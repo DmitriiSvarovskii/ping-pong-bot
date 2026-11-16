@@ -170,7 +170,11 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .profile-rating-summary, .profile-rating-status { display: grid; padding: 19px; gap: 16px; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); }
 .profile-rating-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .profile-rating-heading > div { display: grid; gap: 5px; }
-.profile-rating-heading > div > span { color: var(--muted); font-size: .76rem; font-weight: 700; }
+.profile-rating-heading .rating-title-row > span {
+  color: var(--muted);
+  font-size: .76rem;
+  font-weight: 700;
+}
 .profile-rating-heading > div > strong { color: var(--accent); font-size: 2.5rem; line-height: .9; letter-spacing: -.05em; }
 .rating-reliability { display: inline-flex; max-width: 150px; padding: 7px 9px; border-radius: 999px; font-size: .66rem; font-weight: 800; line-height: 1.25; text-align: center; }
 .reliability-high { color: #167a4b; background: #29a8691a; }
@@ -364,4 +368,94 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 
 .match-rating-voided {
   color: #d55a4d;
+}
+
+/* Rating information */
+
+.rating-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rating-info-button {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  padding: 0;
+  place-items: center;
+  color: var(--muted);
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rating-info-button:active {
+  color: var(--accent);
+  background: color-mix(
+    in srgb,
+    var(--accent) 10%,
+    transparent
+  );
+}
+
+.rating-info-modal {
+  display: grid;
+  width: min(100%, 480px);
+  max-height: 100%;
+  min-width: 0;
+  padding: 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  gap: 18px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px #00000040;
+}
+
+.rating-info-intro {
+  margin: 0;
+  color: var(--muted);
+  font-size: .85rem;
+  line-height: 1.5;
+}
+
+.rating-info-rules {
+  display: grid;
+  gap: 14px;
+}
+
+.rating-info-rules > div {
+  display: grid;
+  gap: 5px;
+}
+
+.rating-info-rules h3 {
+  margin: 0;
+  font-size: .88rem;
+  font-weight: 750;
+}
+
+.rating-info-rules p {
+  margin: 0;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.5;
+}
+
+.rating-info-modal > .primary-button {
+  width: 100%;
+}
+.profile-rating-heading .rating-info-button {
+  width: 30px;
+  height: 30px;
+}
+
+.profile-rating-heading .rating-info-button svg {
+  width: 18px;
+  height: 18px;
 }

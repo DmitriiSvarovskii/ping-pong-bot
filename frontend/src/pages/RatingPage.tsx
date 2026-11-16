@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-
+import { RatingInfo } from '../ratings/RatingInfo'
 import { getLeaderboard, getMyRating } from '../api/ratings'
 import { useAuth } from '../auth/AuthProvider'
 import { ErrorPanel, LoadingPanel } from '../components/SessionUi'
@@ -72,7 +72,13 @@ export function RatingPage() {
     <div className="page-stack rating-page">
       <header className="page-header block">
         <p className="eyebrow">GLICKO-2</p>
-        <h1>Рейтинг</h1>
+        <div className="rating-title-row">
+
+  <h1>Рейтинг</h1>
+
+  <RatingInfo />
+
+</div>
         <p>Рейтинг обновляется ежедневно</p>
       </header>
       <CurrentRatingCard
