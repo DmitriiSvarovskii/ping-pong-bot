@@ -10,6 +10,7 @@ import type {
   SessionStatisticsResponse,
   SetScoreInput,
 } from '../types/gameSessions'
+import type { CorrectMatchResultInput, VoidMatchInput } from '../types/matches'
 import { ApiError, type ApiClient } from './client'
 
 export function createSession(client: ApiClient, input: CreateSessionInput, signal?: AbortSignal) {
@@ -88,6 +89,32 @@ export function recordSessionResult(
       method: 'PUT',
       body: { match_id: matchId, sets, expected_version: expectedVersion },
     },
+  )
+}
+
+export function correctSessionMatchResult(
+  client: ApiClient,
+  sessionId: string,
+  matchId: string,
+  input: CorrectMatchResultInput,
+  signal?: AbortSignal,
+) {
+  return client.request<SessionMatch>(
+    `/game-sessions/${encodeURIComponent(sessionId)}/matches/${encodeURIComponent(matchId)}/results`,
+    { method: 'PATCH', body: input, signal },
+  )
+}
+
+export function voidSessionMatch(
+  client: ApiClient,
+  sessionId: string,
+  matchId: string,
+  input: VoidMatchInput,
+  signal?: AbortSignal,
+) {
+  return client.request<SessionMatch>(
+    `/game-sessions/${encodeURIComponent(sessionId)}/matches/${encodeURIComponent(matchId)}/void`,
+    { method: 'POST', body: input, signal },
   )
 }
 

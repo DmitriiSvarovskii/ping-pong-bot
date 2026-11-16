@@ -48,6 +48,7 @@ function completedMatch(completedAt: string | null): SessionMatch {
     completed_at: completedAt,
     cancelled_at: null,
     version: 2,
+    rating_state: 'not_applicable',
     participants: [{ position: 1, user: first }, { position: 2, user: second }],
     sets: [
       { id: 's1', set_number: 1, player1_score: 11, player2_score: 8, created_at: '2026-11-08T11:25:00Z' },

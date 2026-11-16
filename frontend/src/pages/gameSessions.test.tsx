@@ -848,7 +848,7 @@ function session(overrides: Partial<GameSession> = {}): GameSession {
 }
 
 function match(options: { status?: SessionMatch['status']; winnerId?: string } = {}): SessionMatch {
-  return { id: MATCH_ID, context: 'game_session', status: options.status ?? 'active', created_by: USER_A.id, points_to_win: 11, win_by: 2, sets_to_win: 1, is_ranked: true, winner_id: options.winnerId ?? null, created_at: '2026-11-07T10:00:00Z', updated_at: '2026-11-07T10:00:00Z', started_at: '2026-11-07T10:00:00Z', completed_at: options.status === 'completed' ? '2026-11-07T10:01:00Z' : null, cancelled_at: null, version: 1, participants: [{ position: 1, user: USER_A }, { position: 2, user: USER_B }], sets: options.status === 'completed' ? [{ id: 'set-1', set_number: 1, player1_score: 11, player2_score: 5, created_at: '2026-11-07T10:01:00Z' }] : [], game_session_id: SESSION_ID, sequence_number: 1 }
+  return { id: MATCH_ID, context: 'game_session', status: options.status ?? 'active', created_by: USER_A.id, points_to_win: 11, win_by: 2, sets_to_win: 1, is_ranked: true, winner_id: options.winnerId ?? null, created_at: '2026-11-07T10:00:00Z', updated_at: '2026-11-07T10:00:00Z', started_at: '2026-11-07T10:00:00Z', completed_at: options.status === 'completed' ? '2026-11-07T10:01:00Z' : null, cancelled_at: null, version: 1, rating_state: options.status === 'completed' ? 'pending' : 'not_applicable', participants: [{ position: 1, user: USER_A }, { position: 2, user: USER_B }], sets: options.status === 'completed' ? [{ id: 'set-1', set_number: 1, player1_score: 11, player2_score: 5, created_at: '2026-11-07T10:01:00Z' }] : [], game_session_id: SESSION_ID, sequence_number: 1 }
 }
 
 function nextMatch(): SessionMatch {
