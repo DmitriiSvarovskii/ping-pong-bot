@@ -19,6 +19,7 @@ interface SessionHistoryProps {
   onRetrySummary?: () => void
   onLoadNext?: () => void
   onEditMatch?: (match: SessionMatch) => void
+  onVoidMatch?: (match: SessionMatch) => void
 }
 
 export function SessionHistory({
@@ -36,6 +37,7 @@ export function SessionHistory({
   onRetrySummary,
   onLoadNext,
   onEditMatch,
+  onVoidMatch,
 }: SessionHistoryProps) {
   const sentinel = useRef<HTMLDivElement | null>(null)
   const completed = matches.filter(
@@ -138,19 +140,44 @@ export function SessionHistory({
                           ? 'Аннулирован'
                           : score}
                     </small>
-                    {isCompleted && onEditMatch && (
-                      <details className="match-actions-menu">
-                        <summary aria-label={`Действия матча ${match.sequence_number}`}>⋯</summary>
-                        <div role="menu">
+                    {isCompleted && (onEditMatch || onVoidMatch) && (<details className="match-actions-menu">
+                      <summary
+                        aria-label={`Действия матча ${match.sequence_number}`}
+                      >
+                        ⋯
+                      </summary>
+
+                      <div role="menu">
+                        {onEditMatch && (
                           <button
                             type="button"
                             role="menuitem"
-                            onClick={() => onEditMatch(match)}
+                            onClick={(event) => {
+                              event.currentTarget.closest('details')
+                                ?.removeAttribute('open')
+                              onEditMatch(match)
+                            }}
                           >
                             Редактировать результат
                           </button>
-                        </div>
-                      </details>
+                        )}
+
+                        {onVoidMatch && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="match-action-danger"
+                            onClick={(event) => {
+                              event.currentTarget.closest('details')
+                                ?.removeAttribute('open')
+                              onVoidMatch(match)
+                            }}
+                          >
+                            Аннулировать матч
+                          </button>
+                        )}
+                      </div>
+                    </details>
                     )}
                   </div>
                 </div>

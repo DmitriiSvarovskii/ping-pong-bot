@@ -1,8 +1,18 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
-import { cancelCurrentMatch, skipCurrentMatch, transitionSession } from '../api/gameSessions'
+import {
+
+  cancelCurrentMatch,
+
+  skipCurrentMatch,
+
+  transitionSession,
+
+  voidSessionMatch,
+
+} from '../api/gameSessions'
 import { shareSessionInvitation } from '../auth/telegram'
 import { useAuth } from '../auth/AuthProvider'
 import { SessionHistory } from '../components/SessionHistory'
@@ -20,6 +30,9 @@ import { getDisplayName } from '../hooks/useDisplayName'
 import { useGameSession, useInvalidateSession } from '../hooks/useGameSession'
 import { useSessionRealtime } from '../realtime/useSessionRealtime'
 import type { SessionMatch } from '../types/gameSessions'
+import { ApiError } from '../api/client'
+import { VoidMatchModal } from '../components/VoidMatchModal'
+import { ratingKeys } from '../ratings/queryKeys'
 
 type SessionAction =
   | 'leave'
@@ -37,10 +50,12 @@ export function SessionPage() {
   useSessionRealtime(sessionId)
 
   const invalidate = useInvalidateSession()
+  const queryClient = useQueryClient()
   const nextHistoryPageRequest = useRef<Promise<void> | null>(null)
 
   const [shareMessage, setShareMessage] = useState<string | null>(null)
   const [skipOpen, setSkipOpen] = useState(false)
+  const [voidTarget, setVoidTarget] = useState<SessionMatch | null>(null)
 
   const mutation = useMutation({
     mutationFn: async (action: SessionAction) => {
@@ -96,7 +111,32 @@ export function SessionPage() {
       setSkipOpen(false)
     },
   })
+  const voidMutation = useMutation({
+    mutationFn: (match: SessionMatch) =>
+      voidSessionMatch(apiClient, sessionId, match.id, {
+        expected_version: match.version,
+      }),
 
+    onSuccess: async (_, match) => {
+      await Promise.all([
+        invalidate(sessionId),
+        queryClient.invalidateQueries({
+          queryKey: ratingKeys.all,
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['matches', 'detail', match.id],
+        }),
+      ])
+
+      setVoidTarget(null)
+    },
+
+    onError: async (error) => {
+      if (error instanceof ApiError && error.status === 409) {
+        await invalidate(sessionId)
+      }
+    },
+  })
   const historyMatches = useMemo(() => {
     const unique = new Map<string, SessionMatch>()
 
@@ -156,6 +196,9 @@ export function SessionPage() {
   const current = data.currentMatch.data
 
   const isOrganizer = user?.id === session.organizer_id
+  const canManageMatches =
+    isOrganizer &&
+    (session.status === 'active' || session.status === 'completed')
 
   const isParticipant = participants.some(
     (item) => item.user.id === user?.id,
@@ -353,8 +396,14 @@ export function SessionPage() {
         onRetry={() => void data.matches.refetch()}
         onRetrySummary={() => void data.matchSummary.refetch()}
         onLoadNext={loadNextHistoryPage}
-        onEditMatch={isOrganizer
+        onEditMatch={canManageMatches
           ? (match) => void navigate(`/games/${sessionId}/matches/${match.id}/edit`)
+          : undefined}
+        onVoidMatch={canManageMatches
+          ? (match) => {
+            voidMutation.reset()
+            setVoidTarget(match)
+          }
           : undefined}
       />
 
@@ -447,6 +496,24 @@ export function SessionPage() {
           onClose={() => {
             if (!skipMutation.isPending) {
               setSkipOpen(false)
+            }
+          }}
+        />
+      )}
+      {voidTarget && (
+        <VoidMatchModal
+          match={voidTarget}
+          pending={voidMutation.isPending}
+          error={voidMutation.error}
+          onConfirm={() => {
+            if (!voidMutation.isPending && canManageMatches) {
+              voidMutation.mutate(voidTarget)
+            }
+          }}
+          onClose={() => {
+            if (!voidMutation.isPending) {
+              setVoidTarget(null)
+              voidMutation.reset()
             }
           }}
         />

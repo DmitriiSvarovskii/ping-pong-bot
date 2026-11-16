@@ -277,6 +277,13 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .match-actions-menu > div { position: absolute; z-index: 4; top: calc(100% + 6px); right: 0; min-width: 190px; padding: 6px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 12px 32px #00000024; }
 .match-actions-menu button { width: 100%; padding: 10px 12px; color: var(--text); border: 0; border-radius: 9px; background: transparent; cursor: pointer; font: inherit; font-weight: 700; text-align: left; }
 .match-actions-menu button:active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.match-actions-menu button.match-action-danger {
+  color: #d94e43;
+}
+
+.match-actions-menu button.match-action-danger:active {
+  background: color-mix(in srgb, #d94e43 10%, transparent);
+}
 .match-history article p { margin: 9px 0 5px; }
 .match-history time { display: block; margin-bottom: 5px; color: var(--muted); font-size: .76rem; }
 .session-match-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 0 16px; gap: 8px; }

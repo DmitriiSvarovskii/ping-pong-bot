@@ -109,7 +109,53 @@ describe('session history', () => {
     rerender(<SessionHistory matches={[]} />)
     expect(screen.getByText('Завершённых матчей пока нет.')).toBeInTheDocument()
   })
+  it('allows voiding only manageable completed matches', async () => {
+    const onVoidMatch = vi.fn()
+    const completed = completedMatch('2026-11-08T11:32:00Z')
 
+    const voided: SessionMatch = {
+      ...completed,
+      id: 'voided-match',
+      status: 'voided',
+      winner_id: null,
+      sequence_number: 5,
+    }
+
+    const cancelled: SessionMatch = {
+      ...completed,
+      id: 'cancelled-match',
+      status: 'cancelled',
+      winner_id: null,
+      sequence_number: 6,
+    }
+
+    const { rerender } = render(
+      <SessionHistory
+        matches={[completed, voided, cancelled]}
+        onVoidMatch={onVoidMatch}
+      />,
+    )
+
+    expect(screen.getAllByLabelText(/Действия матча/)).toHaveLength(1)
+
+    const menu = screen.getByLabelText('Действия матча 4')
+
+    await userEvent.click(menu)
+    await userEvent.click(
+      screen.getByRole('menuitem', { name: 'Аннулировать матч' }),
+    )
+
+    expect(onVoidMatch).toHaveBeenCalledTimes(1)
+    expect(onVoidMatch).toHaveBeenCalledWith(completed)
+    expect(menu.closest('details')).not.toHaveAttribute('open')
+
+    rerender(
+      <SessionHistory matches={[completed, voided, cancelled]} />,
+    )
+
+    expect(screen.queryByLabelText(/Действия матча/))
+      .not.toBeInTheDocument()
+  })
   it('shows whole-session counts and the published rating states', () => {
     const pending = {
       ...completedMatch('2026-11-08T11:32:00Z'),
@@ -188,14 +234,14 @@ describe('session history', () => {
     vi.stubGlobal(
       'IntersectionObserver',
       class {
-        constructor(private readonly callback: IntersectionObserverCallback) {}
+        constructor(private readonly callback: IntersectionObserverCallback) { }
         observe(target: Element) {
           this.callback(
             [{ isIntersecting: true, target } as IntersectionObserverEntry],
             this as unknown as IntersectionObserver,
           )
         }
-        disconnect() {}
+        disconnect() { }
       },
     )
 

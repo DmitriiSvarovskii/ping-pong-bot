@@ -65,7 +65,173 @@ describe('game sessions frontend', () => {
       is_ranked: true,
     })
   })
+  it('voids a completed match and refreshes session and rating data', async () => {
+    const { queue, voidCalls } = mockVoidFlow()
 
+    const { client } = renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    client.setQueryData(['ratings'], { cached: true })
+
+    const dialog = await openVoidModal()
+
+    expect(within(dialog).getByText(/будет выполнен пересчёт/))
+      .toBeInTheDocument()
+
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: 'Аннулировать' }),
+    )
+
+    expect(await screen.findByText('Аннулирован')).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    expect(voidCalls()).toHaveLength(1)
+
+    const body = voidCalls()[0]?.[1]?.body
+
+    if (typeof body !== 'string') {
+      throw new Error('Expected POST request body to be a JSON string')
+    }
+
+    expect(JSON.parse(body)).toEqual({
+      expected_version: 1,
+    })
+
+    expect(screen.getByLabelText('Статистика матчей сессии'))
+      .toHaveTextContent('Сыграно0Рейтинговых0Товарищеских0Ожидают расчёта0')
+
+    expect(screen.queryByLabelText('Действия матча 1'))
+      .not.toBeInTheDocument()
+
+    expect(client.getQueryState(['ratings'])?.isInvalidated)
+      .toBe(true)
+
+    expect(client.getQueryData(sessionKeys.queue(SESSION_ID)))
+      .toEqual(queue)
+
+    expect(client.getQueryData(sessionKeys.currentMatch(SESSION_ID)))
+      .toEqual(nextMatch())
+  })
+  it('closes the void dialog without modifying the match', async () => {
+    const { voidCalls } = mockVoidFlow()
+
+    renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    const dialog = await openVoidModal()
+
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: 'Отмена' }),
+    )
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(voidCalls()).toHaveLength(0)
+    expect(screen.getByLabelText('Действия матча 1'))
+      .toBeInTheDocument()
+  })
+  it('blocks repeated void confirmation after a version conflict', async () => {
+    const { voidCalls } = mockVoidFlow({
+      failure: 'conflict',
+    })
+
+    renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    const dialog = await openVoidModal()
+
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: 'Аннулировать' }),
+    )
+
+    expect(await within(dialog).findByRole('alert'))
+      .toHaveTextContent('Не удалось аннулировать матч')
+
+    expect(within(dialog).getByRole('button', { name: 'Аннулировать' }))
+      .toBeDisabled()
+
+    expect(voidCalls()).toHaveLength(1)
+    expect(screen.queryByText('Аннулирован')).not.toBeInTheDocument()
+
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: 'Отмена' }),
+    )
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+  it('does not allow a non-organizer to void a match', async () => {
+    const { voidCalls } = mockVoidFlow({
+      organizerId: USER_B.id,
+    })
+
+    renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    expect(await screen.findByText('Матч #1')).toBeInTheDocument()
+
+    expect(screen.queryByLabelText('Действия матча 1'))
+      .not.toBeInTheDocument()
+
+    expect(voidCalls()).toHaveLength(0)
+  })
+  it('does not warn about rating recalculation for a friendly match', async () => {
+    mockVoidFlow({ ranked: false })
+
+    renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    const dialog = await openVoidModal()
+
+    expect(within(dialog).getByText(
+      'Результат матча будет исключён из статистики.',
+    )).toBeInTheDocument()
+
+    expect(within(dialog).queryByText(/пересчёт/))
+      .not.toBeInTheDocument()
+  })
+  it('keeps the void dialog open after a network failure', async () => {
+    const { voidCalls } = mockVoidFlow({
+      failure: 'network',
+    })
+
+    renderRoute(
+      <SessionPage />,
+      `/games/${SESSION_ID}`,
+      '/games/:sessionId',
+    )
+
+    const dialog = await openVoidModal()
+
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: 'Аннулировать' }),
+    )
+
+    expect(await within(dialog).findByRole('alert'))
+      .toBeInTheDocument()
+
+    expect(within(dialog).getByRole('button', { name: 'Аннулировать' }))
+      .toBeEnabled()
+
+    expect(screen.queryByText('Аннулирован')).not.toBeInTheDocument()
+    expect(voidCalls()).toHaveLength(1)
+  })
   it('renders the current pair and ordered waiting queue', () => {
     const queue: SessionQueue = {
       current_pair: [queueItem('pa', USER_A.id), queueItem('pb', USER_B.id)],
@@ -1095,4 +1261,138 @@ function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === 'string') return input
   if (input instanceof URL) return input.toString()
   return input.url
+}
+function mockVoidFlow({
+  ranked = true,
+  organizerId = USER_A.id,
+  failure = null,
+}: {
+  ranked?: boolean
+  organizerId?: string
+  failure?: 'conflict' | 'network' | null
+} = {}) {
+  let historicalMatch: SessionMatch = {
+    ...match({
+      status: 'completed',
+      winnerId: USER_A.id,
+    }),
+    is_ranked: ranked,
+    rating_state: ranked ? 'rated' : 'not_applicable',
+  }
+
+  const queue: SessionQueue = {
+    current_pair: [
+      queueItem('pa', USER_A.id),
+      queueItem('pc', USER_C.id),
+    ],
+    waiting: [queueItem('pb', USER_B.id)],
+    is_paused: false,
+  }
+
+  const fetchMock = vi.spyOn(globalThis, 'fetch')
+    .mockImplementation((input, request) => {
+      const url = requestUrl(input)
+
+      if (
+        request?.method === 'POST' &&
+        url.endsWith(`/matches/${MATCH_ID}/void`)
+      ) {
+        if (failure === 'network') {
+          return Promise.reject(new TypeError('Offline'))
+        }
+
+        if (failure === 'conflict') {
+          historicalMatch = {
+            ...historicalMatch,
+            version: 2,
+          }
+
+          return Promise.resolve(jsonResponse({
+            error: { code: 'match_version_conflict' },
+          }, 409))
+        }
+
+        historicalMatch = {
+          ...historicalMatch,
+          status: 'voided',
+          winner_id: null,
+          version: 2,
+          rating_state: 'not_applicable',
+        }
+
+        return Promise.resolve(jsonResponse(historicalMatch))
+      }
+
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({
+          status: 'active',
+          organizer_id: organizerId,
+          is_ranked: ranked,
+        })))
+      }
+
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse({
+          items: PARTICIPANTS,
+          total: 3,
+          limit: 100,
+          offset: 0,
+        }))
+      }
+
+      if (url.includes('/queue')) {
+        return Promise.resolve(jsonResponse(queue))
+      }
+
+      if (url.includes('/matches/current')) {
+        return Promise.resolve(jsonResponse(nextMatch()))
+      }
+
+      if (url.includes('/matches/summary')) {
+        const played = historicalMatch.status === 'completed' ? 1 : 0
+
+        return Promise.resolve(jsonResponse({
+          played,
+          ranked: ranked ? played : 0,
+          friendly: ranked ? 0 : played,
+          pending_rating: 0,
+        }))
+      }
+
+      if (url.includes('/matches?')) {
+        return Promise.resolve(jsonResponse({
+          items: [historicalMatch],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }))
+      }
+
+      if (url.includes('/statistics')) {
+        return Promise.resolve(jsonResponse({ items: [] }))
+      }
+
+      return Promise.resolve(jsonResponse({}))
+    })
+
+  return {
+    queue,
+    voidCalls: () => fetchMock.mock.calls.filter(
+      ([input, request]) =>
+        request?.method === 'POST' &&
+        requestUrl(input).endsWith(`/matches/${MATCH_ID}/void`),
+    ),
+  }
+}
+
+async function openVoidModal() {
+  await userEvent.click(
+    await screen.findByLabelText('Действия матча 1'),
+  )
+
+  await userEvent.click(
+    screen.getByRole('menuitem', { name: 'Аннулировать матч' }),
+  )
+
+  return screen.getByRole('dialog', { name: 'Аннулировать матч?' })
 }
