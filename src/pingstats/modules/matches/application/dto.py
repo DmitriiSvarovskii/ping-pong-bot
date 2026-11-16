@@ -22,3 +22,13 @@ class MatchView:
             if participant.position == position:
                 return participant.user_id
         raise RuntimeError(f"Match has no participant at position {position}")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMatchSummary:
+    """Whole-session counts plus lightweight ranked matches for rating classification."""
+
+    played: int
+    ranked: int
+    friendly: int
+    ranked_matches: tuple[Match, ...]

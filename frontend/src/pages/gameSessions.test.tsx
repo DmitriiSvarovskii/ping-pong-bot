@@ -816,6 +816,65 @@ describe('game sessions frontend', () => {
     expect(await screen.findByText('+6')).toBeInTheDocument()
     expect(statisticsCalls).toBe(2)
   })
+
+  it('loads all pages of a session history longer than one hundred matches', async () => {
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(private readonly callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          this.callback(
+            [{ isIntersecting: true, target } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          )
+        }
+        disconnect() {}
+      },
+    )
+    const matchRequests: string[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'completed' })))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(
+          jsonResponse({ items: PARTICIPANTS, total: 3, limit: 100, offset: 0 }),
+        )
+      }
+      if (url.includes('/matches/summary')) {
+        return Promise.resolve(
+          jsonResponse({ played: 101, ranked: 101, friendly: 0, pending_rating: 101 }),
+        )
+      }
+      if (url.includes('/matches?')) {
+        matchRequests.push(url)
+        const offset = Number(new URL(url, 'http://test').searchParams.get('offset') ?? 0)
+        const items = Array.from(
+          { length: Math.min(50, 101 - offset) },
+          (_, itemIndex) => ({
+            ...match({ status: 'completed' }),
+            id: `match-${offset + itemIndex + 1}`,
+            sequence_number: offset + itemIndex + 1,
+          }),
+        )
+        return Promise.resolve(jsonResponse({ items, total: 101, limit: 50, offset }))
+      }
+      if (url.includes('/statistics')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    renderRoute(<SessionPage />, `/games/${SESSION_ID}`, '/games/:sessionId')
+
+    expect(await screen.findByText('Матч #101')).toBeInTheDocument()
+    expect(matchRequests.some((url) => url.includes('offset=0'))).toBe(true)
+    expect(matchRequests.some((url) => url.includes('offset=50'))).toBe(true)
+    expect(matchRequests.some((url) => url.includes('offset=100'))).toBe(true)
+    expect(screen.getByLabelText('Статистика матчей сессии')).toHaveTextContent(
+      'Сыграно101',
+    )
+    vi.unstubAllGlobals()
+  })
 })
 
 function renderRoute(element: React.ReactNode, initial: string, path = '*') {

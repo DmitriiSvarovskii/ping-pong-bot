@@ -49,6 +49,7 @@ from pingstats.modules.game_sessions.schemas import (
     SessionMatchCommandResponse,
     SessionMatchListResponse,
     SessionMatchResponse,
+    SessionMatchSummaryResponse,
     SessionParticipantListResponse,
     SessionParticipantResponse,
     SessionPlayerStatisticsResponse,
@@ -63,7 +64,10 @@ from pingstats.modules.game_sessions.schemas import (
 )
 from pingstats.modules.matches.application.dto import MatchView
 from pingstats.modules.matches.infrastructure.repository import SqlAlchemyMatchRepository
-from pingstats.modules.ratings.application.match_state import RatingMatchStateService
+from pingstats.modules.ratings.application.match_state import (
+    MatchRatingState,
+    RatingMatchStateService,
+)
 from pingstats.modules.ratings.dependencies import (
     get_rating_match_state_service,
     get_rating_query_repository,
@@ -426,6 +430,37 @@ async def list_session_matches(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@game_sessions_router.get(
+    "/{session_id}/matches/summary", response_model=SessionMatchSummaryResponse
+)
+async def get_session_match_summary(
+    session_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    sessions: Annotated[SqlAlchemyGameSessionRepository, Depends(get_game_session_repository)],
+    matches: Annotated[SqlAlchemyMatchRepository, Depends(get_game_session_match_repository)],
+    service: Annotated[GameSessionService, Depends(get_game_session_service)],
+    rating_repository: RatingRepositoryDependency,
+    rating_states: RatingStateServiceDependency,
+) -> SessionMatchSummaryResponse:
+    summary = await service.get_session_match_summary(
+        sessions,
+        matches,
+        actor_id=current_user.id,
+        session_id=session_id,
+    )
+    states = await rating_states.get_states(rating_repository, summary.ranked_matches)
+    pending_rating = sum(
+        state in {MatchRatingState.PENDING, MatchRatingState.RECALCULATING}
+        for state in states.values()
+    )
+    return SessionMatchSummaryResponse(
+        played=summary.played,
+        ranked=summary.ranked,
+        friendly=summary.friendly,
+        pending_rating=pending_rating,
     )
 
 

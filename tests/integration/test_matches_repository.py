@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pingstats.core.config import Settings
 from pingstats.infrastructure.database.engine import Database
+from pingstats.modules.game_sessions.infrastructure.models import GameSessionModel
 from pingstats.modules.matches.application.errors import MatchStateError, MatchVersionConflictError
 from pingstats.modules.matches.application.service import MatchService
-from pingstats.modules.matches.domain import MatchStatus, SetScore
+from pingstats.modules.matches.domain import MatchContext, MatchStatus, SetScore
 from pingstats.modules.matches.infrastructure.models import (
     MatchModel,
     MatchParticipantModel,
@@ -87,6 +88,67 @@ async def match_database() -> AsyncIterator[tuple[async_sessionmaker[AsyncSessio
         yield session_factory, first_id, second_id
         await transaction.rollback()
     await engine.dispose()
+
+
+async def test_session_history_paginates_beyond_one_hundred_and_summary_excludes_voided(
+    match_database: tuple[async_sessionmaker[AsyncSession], UUID, UUID],
+) -> None:
+    session_factory, first_id, second_id = match_database
+    now = datetime.now(UTC)
+    game_session_id = uuid4()
+    async with session_factory() as session:
+        session.add(GameSessionModel(id=game_session_id, organizer_id=first_id))
+        for sequence_number in range(1, 104):
+            if sequence_number <= 101:
+                status = MatchStatus.COMPLETED
+            elif sequence_number == 102:
+                status = MatchStatus.CANCELLED
+            else:
+                status = MatchStatus.VOIDED
+            match_id = uuid4()
+            session.add(
+                MatchModel(
+                    id=match_id,
+                    context=MatchContext.GAME_SESSION,
+                    status=status,
+                    created_by=first_id,
+                    points_to_win=11,
+                    win_by=2,
+                    sets_to_win=1,
+                    is_ranked=sequence_number <= 60,
+                    winner_id=first_id if status is MatchStatus.COMPLETED else None,
+                    game_session_id=game_session_id,
+                    sequence_number=sequence_number,
+                    started_at=now,
+                    completed_at=now if status is not MatchStatus.CANCELLED else None,
+                    cancelled_at=now if status is MatchStatus.CANCELLED else None,
+                    version=1,
+                )
+            )
+            session.add_all(
+                [
+                    MatchParticipantModel(
+                        id=uuid4(), match_id=match_id, user_id=first_id, position=1
+                    ),
+                    MatchParticipantModel(
+                        id=uuid4(), match_id=match_id, user_id=second_id, position=2
+                    ),
+                ]
+            )
+        await session.flush()
+
+        repository = SqlAlchemyMatchRepository(session)
+        first_page, total = await repository.list_for_session(game_session_id, limit=100, offset=0)
+        second_page, second_total = await repository.list_for_session(
+            game_session_id, limit=100, offset=100
+        )
+        summary = await repository.summarize_session_matches(game_session_id)
+
+    assert len(first_page) == 100
+    assert len(second_page) == 3
+    assert total == second_total == 103
+    assert (summary.played, summary.ranked, summary.friendly) == (101, 60, 41)
+    assert len(summary.ranked_matches) == 60
 
 
 async def test_repository_lifecycle_correction_history_and_constraints(

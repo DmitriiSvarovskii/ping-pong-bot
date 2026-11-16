@@ -73,6 +73,13 @@ export interface SessionMatchListResponse {
   offset: number
 }
 
+export interface SessionMatchSummary {
+  played: number
+  ranked: number
+  friendly: number
+  pending_rating: number
+}
+
 export interface SessionPlayerStatistics {
   user: UserPublicProfile
   wins: number

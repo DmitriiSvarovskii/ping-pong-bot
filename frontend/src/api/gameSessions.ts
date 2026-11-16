@@ -5,6 +5,7 @@ import type {
   SessionMatch,
   SessionMatchCommandResponse,
   SessionMatchListResponse,
+  SessionMatchSummary,
   SessionParticipantListResponse,
   SessionQueue,
   SessionStatisticsResponse,
@@ -48,9 +49,26 @@ export function getSessionQueue(client: ApiClient, sessionId: string, signal?: A
   return client.request<SessionQueue>(`/game-sessions/${sessionId}/queue`, { signal })
 }
 
-export function listSessionMatches(client: ApiClient, sessionId: string, signal?: AbortSignal) {
+export function listSessionMatches(
+  client: ApiClient,
+  sessionId: string,
+  offset = 0,
+  limit = 50,
+  signal?: AbortSignal,
+) {
   return client.request<SessionMatchListResponse>(
-    `/game-sessions/${sessionId}/matches?limit=100&offset=0`,
+    `/game-sessions/${sessionId}/matches?limit=${limit}&offset=${offset}`,
+    { signal },
+  )
+}
+
+export function getSessionMatchSummary(
+  client: ApiClient,
+  sessionId: string,
+  signal?: AbortSignal,
+) {
+  return client.request<SessionMatchSummary>(
+    `/game-sessions/${sessionId}/matches/summary`,
     { signal },
   )
 }

@@ -30,7 +30,7 @@ from pingstats.modules.game_sessions.domain import (
     GameSessionParticipant,
     GameSessionStatus,
 )
-from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.dto import MatchView, SessionMatchSummary
 from pingstats.modules.matches.application.errors import InvalidScoreError, MatchStateError
 from pingstats.modules.matches.domain import (
     Match,
@@ -211,6 +211,15 @@ class FakeGameSessionService:
         del sessions, matches, kwargs
         return (self.fixture.completed, self.fixture.current), 2
 
+    async def get_session_match_summary(self, sessions, matches, **kwargs):
+        del sessions, matches, kwargs
+        return SessionMatchSummary(
+            played=1,
+            ranked=1,
+            friendly=0,
+            ranked_matches=(self.fixture.completed.match,),
+        )
+
     async def get_session_statistics(self, sessions, matches, **kwargs):
         del sessions, matches, kwargs
         return (
@@ -310,6 +319,7 @@ async def test_all_game_session_routes_require_jwt() -> None:
             await client.get(f"/api/v1/game-sessions/{session_id}/participants"),
             await client.get(f"/api/v1/game-sessions/{session_id}/queue"),
             await client.get(f"/api/v1/game-sessions/{session_id}/matches"),
+            await client.get(f"/api/v1/game-sessions/{session_id}/matches/summary"),
             await client.get(f"/api/v1/game-sessions/{session_id}/statistics"),
             await client.get(f"/api/v1/game-sessions/{session_id}/matches/current"),
             await client.patch(
@@ -363,6 +373,9 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
         participants = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/participants")
         queue = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/queue")
         matches = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/matches")
+        match_summary = await client.get(
+            f"/api/v1/game-sessions/{fixture.session_id}/matches/summary"
+        )
         statistics = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/statistics")
         current = await client.get(f"/api/v1/game-sessions/{fixture.session_id}/matches/current")
 
@@ -378,6 +391,12 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
         "rated",
         "not_applicable",
     ]
+    assert match_summary.json() == {
+        "played": 1,
+        "ranked": 1,
+        "friendly": 0,
+        "pending_rating": 0,
+    }
     assert statistics.json()["items"][0] == {
         "user": statistics.json()["items"][0]["user"],
         "wins": 1,
@@ -396,6 +415,24 @@ async def test_session_lifecycle_participants_queue_and_match_reads() -> None:
         "complete",
         "cancel",
     ]
+
+
+async def test_session_match_summary_counts_pending_and_recalculating_as_waiting() -> None:
+    fixture = SessionApiFixture()
+    service = FakeGameSessionService(fixture)
+    app = configured_app(fixture, service)
+
+    for published_versions in ({}, {fixture.completed.match.id: frozenset({1})}):
+        app.dependency_overrides[get_rating_query_repository] = (
+            lambda versions=(published_versions): QueryRepository(published_match_versions=versions)
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                f"/api/v1/game-sessions/{fixture.session_id}/matches/summary"
+            )
+
+        assert response.status_code == 200
+        assert response.json()["pending_rating"] == 1
 
 
 async def test_result_retry_cancel_and_paused_responses() -> None:

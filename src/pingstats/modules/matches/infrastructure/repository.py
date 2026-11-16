@@ -5,10 +5,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.dto import MatchView, SessionMatchSummary
 from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
@@ -330,6 +330,35 @@ class SqlAlchemyMatchRepository:
             if view is not None:
                 views.append(view)
         return tuple(views), int(total or 0)
+
+    async def summarize_session_matches(self, session_id: UUID) -> SessionMatchSummary:
+        predicate = (
+            (MatchModel.game_session_id == session_id)
+            & (MatchModel.context == MatchContext.GAME_SESSION)
+            & (MatchModel.status == MatchStatus.COMPLETED)
+        )
+        counts = (
+            await self._session.execute(
+                select(
+                    func.count().label("played"),
+                    func.sum(case((MatchModel.is_ranked.is_(True), 1), else_=0)).label("ranked"),
+                    func.sum(case((MatchModel.is_ranked.is_(False), 1), else_=0)).label("friendly"),
+                ).where(predicate)
+            )
+        ).one()
+        ranked_models = (
+            await self._session.scalars(
+                select(MatchModel)
+                .where(predicate, MatchModel.is_ranked.is_(True))
+                .order_by(MatchModel.sequence_number, MatchModel.id)
+            )
+        ).all()
+        return SessionMatchSummary(
+            played=int(counts.played or 0),
+            ranked=int(counts.ranked or 0),
+            friendly=int(counts.friendly or 0),
+            ranked_matches=tuple(model.to_domain() for model in ranked_models),
+        )
 
     async def list_completed_for_session(self, session_id: UUID) -> Sequence[MatchView]:
         """Load all completed session matches with participants and sets in three queries."""

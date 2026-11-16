@@ -53,7 +53,7 @@ from pingstats.modules.game_sessions.domain import (
 from pingstats.modules.game_sessions.domain import (
     restore_queue_after_cancel as restore_cancelled_queue,
 )
-from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.dto import MatchView, SessionMatchSummary
 from pingstats.modules.matches.application.errors import (
     MatchNotFoundError,
     MatchPermissionError,
@@ -491,6 +491,17 @@ class GameSessionService:
     ) -> tuple[Sequence[MatchView], int]:
         await self._require_read_access(sessions, actor_id, session_id)
         return await matches.list_for_session(session_id, limit=limit, offset=offset)
+
+    async def get_session_match_summary(
+        self,
+        sessions: GameSessionRepository,
+        matches: MatchRepository,
+        *,
+        actor_id: UUID,
+        session_id: UUID,
+    ) -> SessionMatchSummary:
+        await self._require_read_access(sessions, actor_id, session_id)
+        return await matches.summarize_session_matches(session_id)
 
     async def get_session_statistics(
         self,

@@ -154,7 +154,8 @@ cutover.
 | POST | `/game-sessions/{session_id}/cancel` | Реализовано; organizer отменяет pending-сессию |
 | GET | `/game-sessions/{session_id}/participants` | Реализовано; `active_only=true`, `limit`/`offset` |
 | GET | `/game-sessions/{session_id}/queue` | Реализовано; current pair, waiting и `is_paused` |
-| GET | `/game-sessions/{session_id}/matches` | Реализовано; история строго по `sequence_number`, включая cancelled |
+| GET | `/game-sessions/{session_id}/matches` | Реализовано; пагинация `limit`/`offset`, порядок строго по `sequence_number`, включая cancelled и voided |
+| GET | `/game-sessions/{session_id}/matches/summary` | Реализовано; сводка всей сессии: `played`, `ranked`, `friendly`, `pending_rating` |
 | GET | `/game-sessions/{session_id}/statistics` | Реализовано; read-only лидерборд текущей сессии по завершённым матчам |
 | GET | `/game-sessions/{session_id}/matches/current` | Реализовано; current active match либо 404 |
 | POST | `/game-sessions/{session_id}/matches/current/sets` | Реализовано; добавить партию текущего матча |
@@ -166,6 +167,11 @@ cutover.
 | WS | `/game-sessions/ws` | Реализовано; персональный канал invalidation списка «Мои игры» |
 | POST | `/game-sessions/{session_id}/ws-ticket` | Реализовано; Bearer JWT, одноразовый session-scoped ticket с коротким TTL, ответ 201 |
 | WS | `/game-sessions/{session_id}/ws` | Реализовано; authenticated invalidation channel без полных session payloads |
+
+`GET /game-sessions/{session_id}/matches/summary` считает только завершённые матчи:
+`cancelled` и `voided` исключаются из всех показателей, а `pending_rating` включает
+рейтинговые матчи в состояниях `pending` и `recalculating`. Состояние определяется по
+активной `published_version`, а не по времени завершения матча.
 
 Create body: `SessionCreateRequest` с nullable `name`, положительными `points_to_win` и
 `sets_to_win`, `is_ranked`. `SessionResponse` не раскрывает audit payload и содержит только

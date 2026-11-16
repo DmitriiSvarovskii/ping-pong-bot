@@ -6,7 +6,7 @@ from types import TracebackType
 from typing import Protocol
 from uuid import UUID
 
-from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.dto import MatchView, SessionMatchSummary
 from pingstats.modules.matches.domain import (
     Match,
     MatchContext,
@@ -76,6 +76,8 @@ class MatchRepository(Protocol):
     async def list_for_session(
         self, session_id: UUID, *, limit: int, offset: int
     ) -> tuple[Sequence[MatchView], int]: ...
+
+    async def summarize_session_matches(self, session_id: UUID) -> SessionMatchSummary: ...
 
     async def list_completed_for_session(self, session_id: UUID) -> Sequence[MatchView]: ...
 

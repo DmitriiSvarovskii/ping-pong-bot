@@ -164,6 +164,13 @@ class SessionMatchListResponse(BaseModel):
     offset: int
 
 
+class SessionMatchSummaryResponse(BaseModel):
+    played: int
+    ranked: int
+    friendly: int
+    pending_rating: int
+
+
 class SessionPlayerStatisticsResponse(BaseModel):
     user: UserPublicResponse
     wins: int

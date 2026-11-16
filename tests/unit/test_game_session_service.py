@@ -33,7 +33,7 @@ from pingstats.modules.game_sessions.domain import (
     GameSessionQueueState,
     GameSessionStatus,
 )
-from pingstats.modules.matches.application.dto import MatchView
+from pingstats.modules.matches.application.dto import MatchView, SessionMatchSummary
 from pingstats.modules.matches.application.errors import MatchStateError
 from pingstats.modules.matches.domain import (
     Match,
@@ -356,6 +356,21 @@ class FakeMatchRepository:
                 ),
                 key=lambda view: view.match.sequence_number or 0,
             )
+        )
+
+    async def summarize_session_matches(self, session_id: UUID) -> SessionMatchSummary:
+        matches = tuple(
+            view.match
+            for view in self.views.values()
+            if view.match.game_session_id == session_id
+            and view.match.status is MatchStatus.COMPLETED
+        )
+        ranked = tuple(match for match in matches if match.is_ranked)
+        return SessionMatchSummary(
+            played=len(matches),
+            ranked=len(ranked),
+            friendly=len(matches) - len(ranked),
+            ranked_matches=ranked,
         )
 
     async def update_match(
@@ -1266,6 +1281,13 @@ async def test_session_match_and_paused_queue_reads_enforce_access(setup) -> Non
     )
     queue = await service.get_queue(repository, actor_id=player, session_id=created.session.id)
     assert history == (current,) and total == 1
+    summary = await service.get_session_match_summary(
+        repository,
+        repository.matches,
+        actor_id=player,
+        session_id=created.session.id,
+    )
+    assert (summary.played, summary.ranked, summary.friendly) == (0, 0, 0)
     assert queue is not None and len(queue.current_pair) == 2
 
     with pytest.raises(GameSessionPermissionError):
@@ -1276,6 +1298,13 @@ async def test_session_match_and_paused_queue_reads_enforce_access(setup) -> Non
             session_id=created.session.id,
             limit=20,
             offset=0,
+        )
+    with pytest.raises(GameSessionPermissionError):
+        await service.get_session_match_summary(
+            repository,
+            repository.matches,
+            actor_id=outsider,
+            session_id=created.session.id,
         )
 
     paused = await service.cancel_current_match_and_leave(

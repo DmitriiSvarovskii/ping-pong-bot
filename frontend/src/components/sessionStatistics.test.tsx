@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import type { UserPublicProfile } from '../types/api'
@@ -94,5 +94,96 @@ describe('session history', () => {
   it('does not invent a timestamp when completion time is absent', () => {
     render(<SessionHistory matches={[completedMatch(null)]} />)
     expect(screen.getByText('Время завершения неизвестно')).toBeInTheDocument()
+  })
+
+  it('renders loading, error, and empty history states independently', async () => {
+    const retry = vi.fn()
+    const { rerender } = render(<SessionHistory matches={[]} loading />)
+    expect(screen.getByText('Загружаем историю матчей…')).toBeInTheDocument()
+
+    rerender(<SessionHistory matches={[]} error={new Error('offline')} onRetry={retry} />)
+    expect(screen.getByText('Не удалось загрузить историю матчей.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Повторить' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+
+    rerender(<SessionHistory matches={[]} />)
+    expect(screen.getByText('Завершённых матчей пока нет.')).toBeInTheDocument()
+  })
+
+  it('shows whole-session counts and the published rating states', () => {
+    const pending = {
+      ...completedMatch('2026-11-08T11:32:00Z'),
+      id: 'pending-match',
+      is_ranked: true,
+      rating_state: 'pending' as const,
+    }
+    const recalculating = {
+      ...pending,
+      id: 'recalculating-match',
+      rating_state: 'recalculating' as const,
+      sequence_number: 5,
+    }
+    const voided = {
+      ...pending,
+      id: 'voided-match',
+      status: 'voided' as const,
+      rating_state: 'not_applicable' as const,
+      winner_id: null,
+      sequence_number: 6,
+    }
+    const cancelled = {
+      ...pending,
+      id: 'cancelled-match',
+      status: 'cancelled' as const,
+      rating_state: 'not_applicable' as const,
+      winner_id: null,
+      completed_at: null,
+      sequence_number: 7,
+    }
+
+    render(
+      <SessionHistory
+        matches={[pending, recalculating, voided, cancelled]}
+        summary={{ played: 2, ranked: 2, friendly: 0, pending_rating: 2 }}
+      />,
+    )
+
+    expect(screen.getByText('Ожидает расчёта')).toBeInTheDocument()
+    expect(screen.getByText('Пересчитывается')).toBeInTheDocument()
+    expect(screen.getByText('Исключён из статистики и рейтинга')).toBeInTheDocument()
+    expect(screen.getByText('Отменён / пропущен')).toBeInTheDocument()
+    expect(screen.getByLabelText('Статистика матчей сессии')).toHaveTextContent(
+      'Сыграно2Рейтинговых2Товарищеских0Ожидают расчёта2',
+    )
+  })
+
+  it('requests another page when a session history longer than one hundred reaches the end', async () => {
+    const onLoadNext = vi.fn()
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(private readonly callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          this.callback(
+            [{ isIntersecting: true, target } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          )
+        }
+        disconnect() {}
+      },
+    )
+
+    render(
+      <SessionHistory
+        matches={[completedMatch('2026-11-08T11:32:00Z')]}
+        total={101}
+        hasNextPage
+        onLoadNext={onLoadNext}
+      />,
+    )
+
+    expect(screen.getByText('101')).toBeInTheDocument()
+    await waitFor(() => expect(onLoadNext).toHaveBeenCalledTimes(1))
+    vi.unstubAllGlobals()
   })
 })
