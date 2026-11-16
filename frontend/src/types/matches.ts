@@ -39,6 +39,8 @@ export interface MatchResponse {
   completed_at: string | null
   cancelled_at: string | null
   version: number
+  game_session_id: string | null
+  sequence_number: number | null
   rating_state: RatingState
   participants: MatchParticipant[]
   sets: MatchSet[]

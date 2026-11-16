@@ -353,6 +353,9 @@ export function SessionPage() {
         onRetry={() => void data.matches.refetch()}
         onRetrySummary={() => void data.matchSummary.refetch()}
         onLoadNext={loadNextHistoryPage}
+        onEditMatch={isOrganizer
+          ? (match) => void navigate(`/games/${sessionId}/matches/${match.id}/edit`)
+          : undefined}
       />
 
       <section className="session-actions">

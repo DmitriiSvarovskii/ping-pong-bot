@@ -128,6 +128,8 @@ fields не считаются доверенными. Неверная подп
 
 Все ответы, содержащие `MatchResponse` (standalone и матчи игровых сессий), включают read-only
 поле `rating_state`: `not_applicable`, `pending`, `rated` или `recalculating`.
+`MatchResponse` также содержит read-only `game_session_id` и `sequence_number`: для session match
+они идентифицируют исходную сессию и серверный порядок, для остальных контекстов равны `null`.
 
 - `not_applicable` — матч нерейтинговый либо не находится в `completed`, включая `cancelled` и
   `voided`;

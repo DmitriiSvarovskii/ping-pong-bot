@@ -157,6 +157,32 @@ describe('session history', () => {
     )
   })
 
+  it('shows the edit action only when a completed match is manageable', async () => {
+    const onEditMatch = vi.fn()
+    const completed = completedMatch('2026-11-08T11:32:00Z')
+    const cancelled = {
+      ...completed,
+      id: 'cancelled-match',
+      status: 'cancelled' as const,
+      completed_at: null,
+    }
+    const { rerender } = render(
+      <SessionHistory
+        matches={[completed, cancelled]}
+        onEditMatch={onEditMatch}
+      />,
+    )
+
+    expect(screen.getByLabelText('Действия матча 4')).toBeInTheDocument()
+    expect(screen.getAllByLabelText(/Действия матча/)).toHaveLength(1)
+    await userEvent.click(screen.getByLabelText('Действия матча 4'))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Редактировать результат' }))
+    expect(onEditMatch).toHaveBeenCalledWith(completed)
+
+    rerender(<SessionHistory matches={[completed]} />)
+    expect(screen.queryByLabelText('Действия матча 4')).not.toBeInTheDocument()
+  })
+
   it('requests another page when a session history longer than one hundred reaches the end', async () => {
     const onLoadNext = vi.fn()
     vi.stubGlobal(

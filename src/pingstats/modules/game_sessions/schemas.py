@@ -150,11 +150,7 @@ class SessionMatchResponse(MatchResponse):
         match = view.match
         if match.game_session_id is None or match.sequence_number is None:
             raise ValueError("Expected a game-session match")
-        return cls(
-            **MatchResponse.from_view(view, rating_state=rating_state).model_dump(),
-            game_session_id=match.game_session_id,
-            sequence_number=match.sequence_number,
-        )
+        return cls(**MatchResponse.from_view(view, rating_state=rating_state).model_dump())
 
 
 class SessionMatchListResponse(BaseModel):

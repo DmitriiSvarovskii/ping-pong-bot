@@ -124,9 +124,17 @@ async def test_standalone_match_responses_contain_all_rating_states() -> None:
         winner_id=None,
         version=4,
     )
+    session_id = uuid4()
+    session_match = replace(
+        match,
+        id=uuid4(),
+        context=MatchContext.GAME_SESSION,
+        game_session_id=session_id,
+        sequence_number=7,
+    )
     views = {
         item.id: MatchView(match=item, participants=(), sets=())
-        for item in (match, rated, pending, voided)
+        for item in (match, rated, pending, voided, session_match)
     }
 
     class MatchService:
@@ -160,7 +168,12 @@ async def test_standalone_match_responses_contain_all_rating_states() -> None:
         rated.id: "rated",
         pending.id: "pending",
         voided.id: "not_applicable",
+        session_match.id: "pending",
     }
+    assert responses[session_match.id].json()["game_session_id"] == str(session_id)
+    assert responses[session_match.id].json()["sequence_number"] == 7
+    assert responses[rated.id].json()["game_session_id"] is None
+    assert responses[rated.id].json()["sequence_number"] is None
 
 
 def test_openapi_contains_all_match_routes() -> None:

@@ -18,6 +18,7 @@ import type {
 import { CreateSessionPage } from './CreateSessionPage'
 import { ResultPage } from './ResultPage'
 import { SessionInvitePage } from './SessionInvitePage'
+import { SessionMatchEditPage } from './SessionMatchEditPage'
 import { SessionPage } from './SessionPage'
 import { loadResultDraft } from './resultDraft'
 
@@ -821,14 +822,14 @@ describe('game sessions frontend', () => {
     vi.stubGlobal(
       'IntersectionObserver',
       class {
-        constructor(private readonly callback: IntersectionObserverCallback) {}
+        constructor(private readonly callback: IntersectionObserverCallback) { }
         observe(target: Element) {
           this.callback(
             [{ isIntersecting: true, target } as IntersectionObserverEntry],
             this as unknown as IntersectionObserver,
           )
         }
-        disconnect() {}
+        disconnect() { }
       },
     )
     const matchRequests: string[] = []
@@ -875,11 +876,175 @@ describe('game sessions frontend', () => {
     )
     vi.unstubAllGlobals()
   })
+
+  it('prefills and corrects a completed ranked session match with its original version', async () => {
+    const completed = match({ status: 'completed', winnerId: USER_A.id })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input, request) => {
+      const url = requestUrl(input)
+      if (request?.method === 'PATCH') {
+        return Promise.resolve(jsonResponse({ ...completed, version: 2 }))
+      }
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'completed' })))
+      }
+      if (url.endsWith(`/matches/${MATCH_ID}`)) return Promise.resolve(jsonResponse(completed))
+      return Promise.resolve(jsonResponse({}))
+    })
+    const { client } = renderRoute(
+      <SessionMatchEditPage />,
+      `/games/${SESSION_ID}/matches/${MATCH_ID}/edit`,
+      '/games/:sessionId/matches/:matchId/edit',
+    )
+    client.setQueryData(['ratings'], { cached: true })
+
+    expect(await screen.findByLabelText('Счёт Анна')).toHaveValue('11')
+    expect(screen.getByLabelText('Счёт Борис')).toHaveValue('5')
+    expect(screen.getByText(/Изменение результата повлияет на рейтинг игроков/)).toBeInTheDocument()
+    const secondScore = screen.getByLabelText('Счёт Борис')
+    await userEvent.clear(secondScore)
+    await userEvent.type(secondScore, '7')
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить изменения' }))
+
+    expect(await screen.findByText(`/games/${SESSION_ID}`)).toBeInTheDocument()
+    const patchCall = fetchMock.mock.calls.find(([, request]) => request?.method === 'PATCH')
+    const body = patchCall?.[1]?.body
+
+    if (typeof body !== 'string') {
+
+      throw new Error('Expected PATCH request body to be a JSON string')
+
+    }
+
+    expect(JSON.parse(body)).toEqual({
+      sets: [{ player1_score: 11, player2_score: 7 }],
+      expected_version: 1,
+    })
+    expect(client.getQueryState(['ratings'])?.isInvalidated).toBe(true)
+  })
+
+  it('does not show a rating warning for a friendly match', async () => {
+    const friendly = { ...match({ status: 'completed', winnerId: USER_A.id }), is_ranked: false }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'completed', is_ranked: false })))
+      }
+      if (url.endsWith(`/matches/${MATCH_ID}`)) return Promise.resolve(jsonResponse(friendly))
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    renderRoute(
+      <SessionMatchEditPage />,
+      `/games/${SESSION_ID}/matches/${MATCH_ID}/edit`,
+      '/games/:sessionId/matches/:matchId/edit',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Редактировать результат' })).toBeInTheDocument()
+    expect(screen.queryByText(/Изменение результата повлияет на рейтинг игроков/)).not.toBeInTheDocument()
+  })
+
+  it('blocks a non-organizer before editing a session result', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(
+          jsonResponse(session({ status: 'completed', organizer_id: USER_B.id })),
+        )
+      }
+      if (url.endsWith(`/matches/${MATCH_ID}`)) {
+        return Promise.resolve(jsonResponse(match({ status: 'completed' })))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    renderRoute(
+      <SessionMatchEditPage />,
+      `/games/${SESSION_ID}/matches/${MATCH_ID}/edit`,
+      '/games/:sessionId/matches/:matchId/edit',
+    )
+
+    expect(await screen.findByText(
+      'Редактировать результат может только организатор сессии.',
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Сохранить изменения' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [
+      { game_session_id: 'different-session' },
+      'Матч не принадлежит этой игровой сессии.',
+    ],
+    [
+      { status: 'active' as const, completed_at: null, winner_id: null },
+      'Редактировать можно только завершённый матч.',
+    ],
+  ])('rejects an invalid edit target', async (matchOverrides, message) => {
+    const target = { ...match({ status: 'completed', winnerId: USER_A.id }), ...matchOverrides }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'completed' })))
+      }
+      if (url.endsWith(`/matches/${MATCH_ID}`)) return Promise.resolve(jsonResponse(target))
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    renderRoute(
+      <SessionMatchEditPage />,
+      `/games/${SESSION_ID}/matches/${MATCH_ID}/edit`,
+      '/games/:sessionId/matches/:matchId/edit',
+    )
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Сохранить изменения' })).not.toBeInTheDocument()
+  })
+
+  it('keeps stale edits unsaved and explicitly loads the current result after a conflict', async () => {
+    const original = match({ status: 'completed', winnerId: USER_A.id })
+    const current = {
+      ...original,
+      version: 2,
+      sets: [{ ...original.sets[0]!, player1_score: 9, player2_score: 11 }],
+    }
+    let matchReads = 0
+    let patchCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, request) => {
+      const url = requestUrl(input)
+      if (request?.method === 'PATCH') {
+        patchCalls += 1
+        return Promise.resolve(jsonResponse({ error: { code: 'match_version_conflict' } }, 409))
+      }
+      if (url.endsWith(`/game-sessions/${SESSION_ID}`)) {
+        return Promise.resolve(jsonResponse(session({ status: 'completed' })))
+      }
+      if (url.endsWith(`/matches/${MATCH_ID}`)) {
+        matchReads += 1
+        return Promise.resolve(jsonResponse(matchReads === 1 ? original : current))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+
+    renderRoute(
+      <SessionMatchEditPage />,
+      `/games/${SESSION_ID}/matches/${MATCH_ID}/edit`,
+      '/games/:sessionId/matches/:matchId/edit',
+    )
+    await screen.findByLabelText('Счёт Анна')
+    await userEvent.click(screen.getByRole('button', { name: 'Сохранить изменения' }))
+
+    expect(await screen.findByText('Результат уже изменён')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Сохранить изменения' })).toBeDisabled()
+    expect(patchCalls).toBe(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Загрузить актуальный результат' }))
+    await waitFor(() => expect(screen.getByLabelText('Счёт Анна')).toHaveValue('9'))
+    expect(screen.getByLabelText('Счёт Борис')).toHaveValue('11')
+    expect(patchCalls).toBe(1)
+  })
 })
 
 function renderRoute(element: React.ReactNode, initial: string, path = '*') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return { ...render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route element={<AppShell />}><Route path={path} element={element}/><Route path="*" element={<LocationProbe/>}/></Route></Routes></MemoryRouter></QueryClientProvider>), client }
+  return { ...render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><Routes><Route element={<AppShell />}><Route path={path} element={element} /><Route path="*" element={<LocationProbe />} /></Route></Routes></MemoryRouter></QueryClientProvider>), client }
 }
 
 function LocationProbe() {

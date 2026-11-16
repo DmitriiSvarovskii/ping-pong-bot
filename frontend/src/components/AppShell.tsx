@@ -61,6 +61,8 @@ function isFallbackState(state: unknown): boolean {
 }
 
 function fallbackRoute(pathname: string): string {
+  const matchEdit = /^\/games\/([^/]+)\/matches\/[^/]+\/edit$/.exec(pathname)
+  if (matchEdit) return `/games/${matchEdit[1]}`
   const resultMatch = /^\/games\/[^/]+\/result$/.test(pathname)
   if (resultMatch) return pathname.slice(0, -'/result'.length)
   if (pathname.startsWith('/games/')) return '/games'

@@ -5,6 +5,10 @@ import type {
 } from '../types/matches'
 import type { ApiClient } from './client'
 
+export function getMatch(client: ApiClient, matchId: string, signal?: AbortSignal) {
+  return client.request<MatchResponse>(`/matches/${encodeURIComponent(matchId)}`, { signal })
+}
+
 export function correctMatchResult(
   client: ApiClient,
   matchId: string,

@@ -18,6 +18,7 @@ interface SessionHistoryProps {
   onRetry?: () => void
   onRetrySummary?: () => void
   onLoadNext?: () => void
+  onEditMatch?: (match: SessionMatch) => void
 }
 
 export function SessionHistory({
@@ -34,6 +35,7 @@ export function SessionHistory({
   onRetry,
   onRetrySummary,
   onLoadNext,
+  onEditMatch,
 }: SessionHistoryProps) {
   const sentinel = useRef<HTMLDivElement | null>(null)
   const completed = matches.filter(
@@ -128,13 +130,29 @@ export function SessionHistory({
               <article key={match.id}>
                 <div>
                   <span>Матч #{match.sequence_number}</span>
-                  <small>
-                    {isCancelled
-                      ? 'Отменён / пропущен'
-                      : isVoided
-                        ? 'Аннулирован'
-                        : score}
-                  </small>
+                  <div className="match-history-controls">
+                    <small>
+                      {isCancelled
+                        ? 'Отменён / пропущен'
+                        : isVoided
+                          ? 'Аннулирован'
+                          : score}
+                    </small>
+                    {isCompleted && onEditMatch && (
+                      <details className="match-actions-menu">
+                        <summary aria-label={`Действия матча ${match.sequence_number}`}>⋯</summary>
+                        <div role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => onEditMatch(match)}
+                          >
+                            Редактировать результат
+                          </button>
+                        </div>
+                      </details>
+                    )}
+                  </div>
                 </div>
 
                 <p>

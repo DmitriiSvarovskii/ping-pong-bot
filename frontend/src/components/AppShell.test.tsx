@@ -148,6 +148,19 @@ it('uses Rating as fallback for a directly opened player profile', async () => {
   expect(window.location.pathname).toBe('/rating')
 })
 
+it('returns a directly opened match editor to its session', async () => {
+  const bridge = telegramBridge()
+  window.Telegram = { WebApp: bridge.webApp }
+  window.history.replaceState(null, '', '/games/session-id/matches/match-id/edit')
+  renderNavigation()
+
+  expect(screen.getByText('Edit match')).toBeInTheDocument()
+  act(() => telegramBack?.())
+
+  expect(await screen.findByText('Session')).toBeInTheDocument()
+  expect(window.location.pathname).toBe('/games/session-id')
+})
+
 function renderNavigation() {
   return render(
     <BrowserRouter>
@@ -159,6 +172,10 @@ function renderNavigation() {
           <Route path="/players/:userId" element={<Root label="Player" />} />
           <Route path="/games" element={<Games />} />
           <Route path="/games/:sessionId" element={<Root label="Session" />} />
+          <Route
+            path="/games/:sessionId/matches/:matchId/edit"
+            element={<Root label="Edit match" />}
+          />
         </Route>
       </Routes>
     </BrowserRouter>,

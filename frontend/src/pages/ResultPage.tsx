@@ -1,10 +1,15 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { getCurrentSessionMatch, recordSessionResult } from '../api/gameSessions'
 import { ApiError, type ApiClient } from '../api/client'
 import { useAuth } from '../auth/AuthProvider'
+import {
+  getScorePayload,
+  MatchScoreForm,
+  type EditableSetScore,
+} from '../components/MatchScoreForm'
 import { ErrorPanel, LoadingPanel, sessionErrorMessage } from '../components/SessionUi'
 import { getDisplayName } from '../hooks/useDisplayName'
 import { sessionKeys, useInvalidateSession } from '../hooks/useGameSession'
@@ -12,18 +17,12 @@ import { useSessionRealtime } from '../realtime/useSessionRealtime'
 import type {
   SessionMatch,
   SessionMatchCommandResponse,
-  SetScoreInput,
 } from '../types/gameSessions'
 import {
   loadResultDraft,
   removeResultDraft,
   saveResultDraft,
-  type DraftScore,
-  type ResultDraftSet,
 } from './resultDraft'
-
-type EditableScore = DraftScore
-type EditableSetScore = ResultDraftSet
 
 export function ResultPage() {
   const { sessionId = '' } = useParams()
@@ -110,23 +109,10 @@ function ResultEditor({
       }
     },
   })
-  const players = [...match.participants].sort((a, b) => a.position - b.position)
-  const canSubmit = getScorePayload(sets) !== null
 
   useEffect(() => {
     if (userId) saveResultDraft(userId, match.id, sets)
   }, [match.id, sets, userId])
-
-  function updateSet(index: number, position: 1 | 2, value: EditableScore) {
-    setSets((items) => items.map((item, itemIndex) => itemIndex === index
-      ? { ...item, [position === 1 ? 'player1_score' : 'player2_score']: value }
-      : item))
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!mutation.isPending && !stale && canSubmit) mutation.mutate()
-  }
 
   async function refreshStale() {
     removeResultDraft(userId, match.id)
@@ -166,39 +152,14 @@ function ResultEditor({
         <h1>Записать результат</h1>
         <p>Победителя определит сервер.</p>
       </header>
-      <form className="score-form" onSubmit={submit}>
-        {sets.map((set, index) => (
-          <section className="set-editor" key={index}>
-            <div className="section-title">
-              <h2>Сет {index + 1}</h2>
-              {sets.length > 1 && (
-                <button
-                  type="button"
-                  className="quiet-button"
-                  onClick={() => setSets((items) => items.filter(
-                    (_, itemIndex) => itemIndex !== index,
-                  ))}
-                >
-                  Удалить
-                </button>
-              )}
-            </div>
-            <div className="score-grid">
-              <ScoreControl
-                label={players[0] ? getDisplayName(players[0].user) : 'Игрок A'}
-                value={set.player1_score}
-                onChange={(value) => updateSet(index, 1, value)}
-              />
-              <span className="score-divider">:</span>
-              <ScoreControl
-                label={players[1] ? getDisplayName(players[1].user) : 'Игрок B'}
-                value={set.player2_score}
-                onChange={(value) => updateSet(index, 2, value)}
-              />
-            </div>
-          </section>
-        ))}
-        {stale && (
+      <MatchScoreForm
+        players={match.participants}
+        sets={sets}
+        onSetsChange={setSets}
+        onSubmit={() => mutation.mutate()}
+        pending={mutation.isPending}
+        disabled={stale}
+        notice={stale ? (
           <div className="stale-warning">
             <strong>Матч уже изменился</strong>
             <p>Старый результат не будет отправлен в новый матч.</p>
@@ -210,87 +171,11 @@ function ResultEditor({
               Загрузить актуальный матч
             </button>
           </div>
-        )}
-        {mutation.error && !stale && (
+        ) : null}
+        error={mutation.error && !stale ? (
           <p className="form-error">{sessionErrorMessage(mutation.error)}</p>
-        )}
-        <div className="score-form-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => setSets((items) => [
-              ...items,
-              { player1_score: 0, player2_score: 0 },
-            ])}
-          >
-            + Добавить сет
-          </button>
-          <button className="primary-button" disabled={mutation.isPending || stale || !canSubmit}>
-            {mutation.isPending ? 'Сохраняем…' : 'Сохранить результат'}
-          </button>
-        </div>
-      </form>
+        ) : null}
+      />
     </div>
   )
-}
-
-function ScoreControl({
-  label,
-  onChange,
-  value,
-}: {
-  label: string
-  value: EditableScore
-  onChange: (value: EditableScore) => void
-}) {
-  const numericValue = value === '' ? 0 : value
-  return (
-    <label className="score-control">
-      <span>{label}</span>
-      <div>
-        <button
-          type="button"
-          aria-label={`Уменьшить счёт ${label}`}
-          onClick={() => onChange(Math.max(0, numericValue - 1))}
-        >
-          −
-        </button>
-        <input
-          aria-label={`Счёт ${label}`}
-          type="text"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          maxLength={5}
-          value={value}
-          onFocus={() => { if (value === 0) onChange('') }}
-          onChange={(event) => {
-            const next = event.target.value
-            if (next === '') onChange('')
-            else if (/^\d+$/.test(next) && Number(next) <= 32767) onChange(Number(next))
-          }}
-        />
-        <button
-          type="button"
-          aria-label={`Увеличить счёт ${label}`}
-          onClick={() => onChange(Math.min(32767, numericValue + 1))}
-        >
-          +
-        </button>
-      </div>
-    </label>
-  )
-}
-
-function getScorePayload(sets: EditableSetScore[]): SetScoreInput[] | null {
-  if (!sets.every((set) => isValidScore(set.player1_score) && isValidScore(set.player2_score))) {
-    return null
-  }
-  return sets.map((set) => ({
-    player1_score: Number(set.player1_score),
-    player2_score: Number(set.player2_score),
-  }))
-}
-
-function isValidScore(value: EditableScore): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 32767
 }

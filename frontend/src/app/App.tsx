@@ -14,11 +14,12 @@ import { ProfilePage } from '../pages/ProfilePage'
 import { RatingPage } from '../pages/RatingPage'
 import { ResultPage } from '../pages/ResultPage'
 import { SessionInvitePage } from '../pages/SessionInvitePage'
+import { SessionMatchEditPage } from '../pages/SessionMatchEditPage'
 import { SessionPage } from '../pages/SessionPage'
 import { SessionsPage } from '../pages/SessionsPage'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
 
 export function App() {
-  return <QueryClientProvider client={queryClient}><AuthProvider><AuthGate><BrowserRouter><TelegramStartParamRedirect/><Routes><Route element={<AppShell />}><Route index element={<HomePage />} /><Route path="profile" element={<ProfilePage />} /><Route path="players/:userId" element={<PlayerProfilePage />} /><Route path="rating" element={<RatingPage />} /><Route path="games" element={<SessionsPage />} /><Route path="games/create" element={<CreateSessionPage />} /><Route path="games/join" element={<JoinSessionPage />} /><Route path="games/:sessionId" element={<SessionPage />} /><Route path="games/:sessionId/result" element={<ResultPage />} /><Route path="games/:sessionId/invite" element={<SessionInvitePage />} /><Route path="*" element={<PlaceholderPage title="Страница не найдена" description="Проверьте адрес или вернитесь на главную." />} /></Route></Routes></BrowserRouter></AuthGate></AuthProvider></QueryClientProvider>
+  return <QueryClientProvider client={queryClient}><AuthProvider><AuthGate><BrowserRouter><TelegramStartParamRedirect/><Routes><Route element={<AppShell />}><Route index element={<HomePage />} /><Route path="profile" element={<ProfilePage />} /><Route path="players/:userId" element={<PlayerProfilePage />} /><Route path="rating" element={<RatingPage />} /><Route path="games" element={<SessionsPage />} /><Route path="games/create" element={<CreateSessionPage />} /><Route path="games/join" element={<JoinSessionPage />} /><Route path="games/:sessionId" element={<SessionPage />} /><Route path="games/:sessionId/result" element={<ResultPage />} /><Route path="games/:sessionId/invite" element={<SessionInvitePage />} /><Route path="games/:sessionId/matches/:matchId/edit" element={<SessionMatchEditPage />} /><Route path="*" element={<PlaceholderPage title="Страница не найдена" description="Проверьте адрес или вернитесь на главную." />} /></Route></Routes></BrowserRouter></AuthGate></AuthProvider></QueryClientProvider>
 }

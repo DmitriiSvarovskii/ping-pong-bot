@@ -84,6 +84,8 @@ class MatchResponse(BaseModel):
     completed_at: datetime | None
     cancelled_at: datetime | None
     version: int
+    game_session_id: UUID | None
+    sequence_number: int | None
     rating_state: MatchRatingState
     participants: list[MatchParticipantResponse]
     sets: list[MatchSetResponse]
@@ -112,6 +114,8 @@ class MatchResponse(BaseModel):
             completed_at=match.completed_at,
             cancelled_at=match.cancelled_at,
             version=match.version,
+            game_session_id=match.game_session_id,
+            sequence_number=match.sequence_number,
             rating_state=rating_state,
             participants=[
                 MatchParticipantResponse(
