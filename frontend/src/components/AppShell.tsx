@@ -64,5 +64,6 @@ function fallbackRoute(pathname: string): string {
   const resultMatch = /^\/games\/[^/]+\/result$/.test(pathname)
   if (resultMatch) return pathname.slice(0, -'/result'.length)
   if (pathname.startsWith('/games/')) return '/games'
+  if (pathname.startsWith('/players/')) return '/rating'
   return '/'
 }

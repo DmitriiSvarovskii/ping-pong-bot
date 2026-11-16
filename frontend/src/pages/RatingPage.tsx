@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 
 import { getLeaderboard, getMyRating } from '../api/ratings'
 import { useAuth } from '../auth/AuthProvider'
@@ -180,10 +181,13 @@ function CurrentRatingCard({
 }
 
 function LeaderboardRow({ player, current }: { player: LeaderboardItem; current: boolean }) {
+  const displayName = getDisplayName(player)
   return (
-    <article
+    <Link
+      to={current ? '/profile' : `/players/${player.user_id}`}
       className={`global-leaderboard-row ${current ? 'current-user' : ''}`}
       data-testid={`leaderboard-user-${player.user_id}`}
+      aria-label={`Открыть профиль ${displayName}`}
     >
       <strong className="leaderboard-position">{formatRatingPosition(player.position)}</strong>
       {player.photo_url ? (
@@ -192,12 +196,12 @@ function LeaderboardRow({ player, current }: { player: LeaderboardItem; current:
         <span className="leaderboard-avatar avatar-fallback"><UserIcon /></span>
       )}
       <div className="leaderboard-player-copy">
-        <strong>{getDisplayName(player)}</strong>
+        <strong>{displayName}</strong>
         <small>{player.rated_matches_count} рейтинговых матчей</small>
       </div>
       <strong className="leaderboard-rating">{formatRating(player.rating)}</strong>
       {current && <span className="current-user-label">Вы</span>}
-    </article>
+    </Link>
   )
 }
 

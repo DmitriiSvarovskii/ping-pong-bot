@@ -111,6 +111,43 @@ it('opens Rating as a root tab without enabling Telegram Back Button', async () 
   expect(bridge.show).not.toHaveBeenCalled()
 })
 
+it('returns from a player profile to Rating with its scroll position restored', async () => {
+  const bridge = telegramBridge()
+  window.Telegram = { WebApp: bridge.webApp }
+  window.history.replaceState(null, '', '/rating')
+  renderNavigation()
+  await screen.findByText('Rating')
+  await waitFor(() => expect(scrollToMock).toHaveBeenCalledWith(0, 0))
+  scrollToMock.mockClear()
+
+  scrollY = 360
+  fireEvent.scroll(window)
+  await waitFor(() => expect(
+    window.sessionStorage.getItem('pingstats:scroll:default:/rating'),
+  ).toBe('360'))
+  await userEvent.click(screen.getByRole('link', { name: 'Open player' }))
+  expect(await screen.findByText('Player')).toBeInTheDocument()
+  await waitFor(() => expect(telegramBack).toBeTypeOf('function'))
+
+  act(() => telegramBack?.())
+
+  expect(await screen.findByText('Rating')).toBeInTheDocument()
+  await waitFor(() => expect(scrollToMock).toHaveBeenCalledWith(0, 360))
+})
+
+it('uses Rating as fallback for a directly opened player profile', async () => {
+  const bridge = telegramBridge()
+  window.Telegram = { WebApp: bridge.webApp }
+  window.history.replaceState(null, '', '/players/direct-player')
+  renderNavigation()
+
+  expect(screen.getByText('Player')).toBeInTheDocument()
+  act(() => telegramBack?.())
+
+  expect(await screen.findByText('Rating')).toBeInTheDocument()
+  expect(window.location.pathname).toBe('/rating')
+})
+
 function renderNavigation() {
   return render(
     <BrowserRouter>
@@ -118,13 +155,18 @@ function renderNavigation() {
         <Route element={<AppShell />}>
           <Route path="/" element={<Root label="Home" />} />
           <Route path="/profile" element={<Root label="Profile" />} />
-          <Route path="/rating" element={<Root label="Rating" />} />
+          <Route path="/rating" element={<RatingRoot />} />
+          <Route path="/players/:userId" element={<Root label="Player" />} />
           <Route path="/games" element={<Games />} />
           <Route path="/games/:sessionId" element={<Root label="Session" />} />
         </Route>
       </Routes>
     </BrowserRouter>,
   )
+}
+
+function RatingRoot() {
+  return <><Root label="Rating" /><Link to="/players/player-id">Open player</Link></>
 }
 
 function Games() {

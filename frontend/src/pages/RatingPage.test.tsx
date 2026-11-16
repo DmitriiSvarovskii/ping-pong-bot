@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 
 import { ApiClient } from '../api/client'
 import type { CurrentRating, LeaderboardItem, LeaderboardResponse } from '../types/ratings'
@@ -111,6 +111,28 @@ describe('RatingPage', () => {
     expect(leaderboardCalls).toBe(2)
   })
 
+  it('opens another player profile from the leaderboard', async () => {
+    const other = leaderboardPlayer(1, 'Иван', 'Петров')
+    mockRatingApi(currentRating(), leaderboardResponse([other], 1))
+    renderPage()
+    await screen.findByText('Иван Петров')
+
+    await userEvent.click(screen.getByRole('link', { name: 'Открыть профиль Иван Петров' }))
+
+    expect(screen.getByTestId('destination')).toHaveTextContent(`/players/${other.user_id}`)
+  })
+
+  it('opens the existing personal profile for the current player', async () => {
+    const current = leaderboardPlayer(2, 'Анна', null, CURRENT_USER_ID)
+    mockRatingApi(currentRating(), leaderboardResponse([current], 1))
+    renderPage()
+    await screen.findByText('Анна')
+
+    await userEvent.click(screen.getByRole('link', { name: 'Открыть профиль Анна' }))
+
+    expect(screen.getByTestId('destination')).toHaveTextContent('/profile')
+  })
+
   it('disconnects pagination observation on unmount', async () => {
     mockRatingApi(
       currentRating(),
@@ -159,9 +181,20 @@ function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/rating']}><RatingPage /></MemoryRouter>
+      <MemoryRouter initialEntries={['/rating']}>
+        <Routes>
+          <Route path="/rating" element={<RatingPage />} />
+          <Route path="/profile" element={<Destination />} />
+          <Route path="/players/:userId" element={<Destination />} />
+        </Routes>
+      </MemoryRouter>
     </QueryClientProvider>,
   )
+}
+
+function Destination() {
+  const location = useLocation()
+  return <span data-testid="destination">{location.pathname}</span>
 }
 
 function latestObserver(): MockIntersectionObserver {
