@@ -9,6 +9,7 @@ import {
   formatRatingCalculationState,
 } from '../ratings/formatters'
 import { ratingKeys } from '../ratings/queryKeys'
+import { RatingHistory } from '../ratings/RatingHistory'
 import { RatingSummary } from '../ratings/RatingSummary'
 import type { RatingStatusResponse } from '../types/ratings'
 
@@ -50,6 +51,7 @@ export function ProfilePage() {
         error={!!ratingStatus.error}
         onRetry={() => void ratingStatus.refetch()}
       />
+      <RatingHistory userId={user.id} />
       <section className="info-card">
         <div><span>Имя</span><strong>{user.first_name}</strong></div>
         {user.last_name && <div><span>Фамилия</span><strong>{user.last_name}</strong></div>}

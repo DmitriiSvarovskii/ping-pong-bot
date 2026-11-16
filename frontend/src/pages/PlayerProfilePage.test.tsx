@@ -19,6 +19,11 @@ vi.mock('../auth/AuthProvider', () => ({
     user: currentUser(),
   }),
 }))
+vi.mock('../ratings/RatingHistory', () => ({
+  RatingHistory: ({ userId }: { userId: string }) => (
+    <section data-testid="rating-history">История {userId}</section>
+  ),
+}))
 
 beforeEach(() => {
   auth.apiClient = new ApiClient()
@@ -38,6 +43,7 @@ describe('PlayerProfilePage', () => {
     expect(within(summary).getByText('9')).toBeInTheDocument()
     expect(within(summary).getByText('Надёжность: Средняя')).toBeInTheDocument()
     expect(screen.queryByText('Расчёт рейтинга')).not.toBeInTheDocument()
+    expect(screen.getByTestId('rating-history')).toHaveTextContent(OTHER_USER_ID)
   })
 
   it('keeps the public profile visible when rating is not published', async () => {

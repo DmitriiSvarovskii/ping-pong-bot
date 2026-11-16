@@ -197,6 +197,39 @@ h1 { margin: 4px 0 0; font-size: clamp(2rem, 9vw, 3rem); line-height: .98; lette
 .profile-rating-status-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .profile-rating-status-error p { margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.4; }
 .profile-rating-status-error .secondary-button { min-height: 42px; padding: 9px 14px; flex: none; }
+.rating-history-section { display: grid; min-width: 0; padding: 19px; gap: 14px; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); }
+.rating-range-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+.rating-range-filters button { min-width: 0; min-height: 38px; padding: 7px 4px; color: var(--muted); border: 0; border-radius: 11px; background: color-mix(in srgb, var(--muted) 7%, transparent); font-size: clamp(.61rem, 2.7vw, .72rem); font-weight: 750; cursor: pointer; }
+.rating-range-filters button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--surface)); }
+.rating-chart-card { min-width: 0; overflow: hidden; border-radius: 17px; background: color-mix(in srgb, var(--muted) 5%, transparent); }
+.rating-chart { display: block; width: 100%; height: auto; min-height: 156px; overflow: visible; }
+.rating-chart-grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 5; }
+.rating-chart-line { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.rating-chart-point-control { cursor: pointer; outline: none; }
+.rating-chart-hit-area { fill: transparent; }
+.rating-chart-point { fill: var(--surface); stroke: var(--accent); stroke-width: 2.5; transition: r .12s ease; }
+.rating-chart-point.selected, .rating-chart-point-control:focus-visible .rating-chart-point { r: 6px; fill: var(--accent); }
+.rating-point-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; padding: 12px; gap: 10px; border-top: 1px solid var(--border); }
+.rating-point-details > div { display: grid; min-width: 0; gap: 3px; }
+.rating-point-details dt { color: var(--muted); font-size: .65rem; }
+.rating-point-details dd { margin: 0; font-size: .82rem; font-weight: 800; overflow-wrap: anywhere; }
+.rating-history-list { display: grid; gap: 7px; }
+.rating-history-item { display: flex; min-height: 58px; padding: 10px 12px; align-items: center; justify-content: space-between; gap: 12px; border-radius: 14px; background: color-mix(in srgb, var(--muted) 6%, transparent); }
+.rating-history-item > div { display: grid; min-width: 0; gap: 3px; }
+.rating-history-item > div:last-child { justify-items: end; }
+.rating-history-item time { font-size: .78rem; font-weight: 750; }
+.rating-history-item small { color: var(--muted); font-size: .67rem; }
+.rating-history-item strong { font-size: .95rem; }
+.rating-history-item span { font-size: .7rem; font-weight: 800; }
+.rating-change-positive { color: var(--accent); }
+.rating-change-negative { color: #c5473c; }
+.rating-change-neutral { color: var(--muted); }
+.rating-history-state { display: grid; min-height: 170px; padding: 22px; place-items: center; align-content: center; gap: 12px; text-align: center; border-radius: 17px; background: color-mix(in srgb, var(--muted) 5%, transparent); }
+.rating-history-state p { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.rating-history-state .secondary-button { min-height: 42px; padding: 9px 14px; }
+.rating-history-more { width: 100%; min-height: 46px; padding: 10px 14px; }
+.rating-history-pagination { display: flex; padding: 10px 12px; align-items: center; justify-content: space-between; gap: 10px; border-radius: 14px; background: #e8504215; color: var(--muted); font-size: .75rem; }
+.rating-history-pagination .secondary-button { min-height: 40px; padding: 8px 12px; flex: none; }
 
 .session-hero { position: relative; display: grid; gap: 14px; padding: 22px; overflow: hidden; border-radius: 26px; color: #fff; background: linear-gradient(145deg, #24965d, #164d35); }
 .session-hero h1 { margin-top: 16px; font-size: 2.2rem; }

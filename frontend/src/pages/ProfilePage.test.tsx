@@ -18,6 +18,11 @@ vi.mock('../auth/AuthProvider', () => ({
     user: currentUser(),
   }),
 }))
+vi.mock('../ratings/RatingHistory', () => ({
+  RatingHistory: ({ userId }: { userId: string }) => (
+    <section data-testid="rating-history">История {userId}</section>
+  ),
+}))
 
 beforeEach(() => {
   auth.apiClient = new ApiClient()
@@ -38,6 +43,7 @@ describe('ProfilePage rating', () => {
     expect(screen.getByText(formatNextCalculationAt(ratingStatus().next_calculation_at)))
       .toBeInTheDocument()
     expect(screen.getAllByText('@anna')).toHaveLength(2)
+    expect(screen.getByTestId('rating-history')).toHaveTextContent(USER_ID)
   })
 
   it('shows pending publication instead of suggesting a first match', async () => {

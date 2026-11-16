@@ -8,6 +8,7 @@ import { useAuth } from '../auth/AuthProvider'
 import { ProfileCard } from '../components/ProfileCard'
 import { isRatingNotFound } from '../ratings/errors'
 import { ratingKeys } from '../ratings/queryKeys'
+import { RatingHistory } from '../ratings/RatingHistory'
 import { RatingSummary } from '../ratings/RatingSummary'
 
 const userProfileKeys = {
@@ -63,6 +64,7 @@ function OtherPlayerProfile({ userId }: { userId: string }) {
         emptyDescription="У игрока ещё нет опубликованного рейтинга."
         onRetry={() => void rating.refetch()}
       />
+      <RatingHistory userId={userId} />
     </div>
   )
 }
